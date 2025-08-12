@@ -1,20 +1,11 @@
 # vma_vote_exe.py — Multi-threaded voter (Jimin-only)
-# Real-name emails only, smaller window, interactive prompts, start/end scheduling,
-# total-vote aggregation, robust Submit modal, max threads = 6, and OPTIONAL color output.
+# Real-name emails only, smaller window, prompts only for threads & loops,
+# starts immediately and ends when loops complete, total-vote aggregation,
+# robust Submit modal, max threads = 6, no colorama.
 
 import time, random, re, sys, argparse, threading
 from typing import Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
-# ---------- Color Output (optional) ----------
-try:
-    from colorama import Fore, Style, init as _cinit
-    _cinit(autoreset=True)
-except Exception:
-    # Fallback: define no-op colors so the script runs even if colorama isn't present
-    class _NoColor:
-        def __getattr__(self, _): return ""
-    Fore = Style = _NoColor()
 
 # ---------- Selenium & Drivers ----------
 from selenium import webdriver
@@ -41,36 +32,14 @@ _global_submit_count = 0
 _submit_lock = threading.Lock()
 _counter_lock = threading.Lock()
 _global_vote_no = 0
-END_TS_GLOBAL: Optional[float] = None
 
 # ---------- CLI ----------
 def parse_args():
     parser = argparse.ArgumentParser(description=f"VMA voter (Selenium, multi-thread, max threads = {MAX_THREADS})")
     parser.add_argument("--threads", type=int, default=1, help=f"Number of parallel threads (max {MAX_THREADS})")
     parser.add_argument("--loops", type=int, default=1, help="Loops per thread (0 = infinite)")
-    parser.add_argument("--headless", action="store_true", help="Run in headless mode")
     parser.add_argument("--edge", action="store_true", help="Use Edge instead of Chrome")
     return parser.parse_args()
-
-# ---------- Time helpers ----------
-def _parse_hhmm(s: Optional[str]):
-    if not s: return None
-    m = re.match(r"^(\d{1,2}):(\d{2})$", s.strip())
-    if not m: raise ValueError(f"Invalid time '{s}' (HH:MM)")
-    hh, mm = int(m.group(1)), int(m.group(2))
-    if not (0 <= hh < 24 and 0 <= mm < 60): raise ValueError(f"Invalid time '{s}'")
-    now = time.localtime()
-    return time.mktime((now.tm_year, now.tm_mon, now.tm_mday, hh, mm, 0, now.tm_wday, now.tm_yday, now.tm_isdst))
-
-def _wait_until(ts: Optional[float]):
-    if not ts: return
-    while True:
-        now = time.time()
-        if now >= ts: break
-        remain = int(ts - now)
-        print(Fore.CYAN + f"⏳ Waiting to start… {remain:>4}s", end="\r")
-        time.sleep(1)
-    print()
 
 # ---------- Small utils ----------
 def rdelay(a=0.08, b=0.16): time.sleep(random.uniform(a, b))
@@ -121,11 +90,9 @@ def gen_email():
     return f"{fn}.{ln}.{num}@{random.choice(DOMAINS)}".lower()
 
 # ---------- Core flow (per thread) ----------
-def worker(worker_id: int, loops: int, headless: bool, use_edge: bool=False):
+def worker(worker_id: int, loops: int, use_edge: bool=False):
     opts = EdgeOptions() if use_edge else ChromeOptions()
-    if headless:
-        opts.add_argument("--headless=new")
-    opts.add_argument("--window-size=800,600")
+    opts.add_argument("--window-size=800,600")  # visible, smaller window
     for a in ["--disable-logging","--log-level=3","--no-default-browser-check","--disable-background-networking"]:
         opts.add_argument(a)
 
@@ -135,16 +102,16 @@ def worker(worker_id: int, loops: int, headless: bool, use_edge: bool=False):
         else:
             driver = webdriver.Chrome(ChromeDriverManager().install(), options=opts)
     except Exception as e:
-        print(Fore.RED + f"[T{worker_id}] ❌ Unable to start browser: {e}")
+        print(f"[T{worker_id}] ❌ Unable to start browser: {e}")
         return
 
     def login():
         try:
             driver.get(VOTE_URL)
         except WebDriverException as e:
-            print(Fore.RED + f"[T{worker_id}] nav error: {e}")
+            print(f"[T{worker_id}] nav error: {e}")
             return False, None
-        print(Fore.CYAN + f"[T{worker_id}] ▶ started")
+        print(f"[T{worker_id}] ▶ started")
 
         rdelay(0.6, 1.0)
         try:
@@ -180,7 +147,7 @@ def worker(worker_id: int, loops: int, headless: bool, use_edge: bool=False):
                 break
             time.sleep(0.15)
         if not logged:
-            print(Fore.YELLOW + f"[T{worker_id}] ⚠️ could not click Log in")
+            print(f"[T{worker_id}] ⚠️ could not click Log in")
             return False, None
 
         try:
@@ -188,7 +155,7 @@ def worker(worker_id: int, loops: int, headless: bool, use_edge: bool=False):
                 EC.presence_of_element_located((By.XPATH, "//input[@type='email' or starts-with(@id,'field-:')]"))
             )
         except TimeoutException:
-            print(Fore.YELLOW + f"[T{worker_id}] ⚠️ email form stuck")
+            print(f"[T{worker_id}] ⚠️ email form stuck")
             return False, None
         return True, addr
 
@@ -241,6 +208,7 @@ def worker(worker_id: int, loops: int, headless: bool, use_edge: bool=False):
                 except StaleElementReferenceException:
                     pass
 
+        # Submit modal
         def click_submit_modal(tries=60, gap=0.15):
             MODAL_X = "//*[@role='dialog' or contains(@id,'chakra-modal')]"
             def text_ok(s: str) -> bool:
@@ -283,13 +251,6 @@ def worker(worker_id: int, loops: int, headless: bool, use_edge: bool=False):
             return False
 
         click_submit_modal()
-        for _ in range(12):
-            try:
-                b = driver.find_element(By.XPATH, "//button[not(@disabled) and (contains(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'ok') or contains(.,'done') or contains(.,'close') or contains(.,'continue'))]")
-                if safe_click(driver, b): break
-            except NoSuchElementException:
-                pass
-            time.sleep(0.15)
         return True
 
     def logout_and_wait():
@@ -312,25 +273,22 @@ def worker(worker_id: int, loops: int, headless: bool, use_edge: bool=False):
     current_loop = 0
     try:
         while True:
-            if END_TS_GLOBAL and time.time() >= END_TS_GLOBAL:
-                print(Fore.CYAN + f"[T{worker_id}] ⏹ End time reached — stopping")
-                break
             if loops != 0 and current_loop >= loops:
                 break
             current_loop += 1
 
             ok, email = login()
             if not ok:
-                print(Fore.YELLOW + f"[T{worker_id}] ⚠️ login failed"); break
+                print(f"[T{worker_id}] ⚠️ login failed"); break
             if not vote_jimin_only():
-                print(Fore.YELLOW + f"[T{worker_id}] ⚠️ vote failed"); break
+                print(f"[T{worker_id}] ⚠️ vote failed"); break
 
             with _submit_lock:
                 global _global_submit_count
                 _global_submit_count += 10
 
             vno = next_vote_no()
-            print(Fore.GREEN + f"[T{worker_id}] ✅ Submitted 10 votes (#{vno}) | {email or 'N/A'}")
+            print(f"[T{worker_id}] ✅ Submitted 10 votes (#{vno}) | {email or 'N/A'}")
 
             logout_and_wait()
 
@@ -355,41 +313,21 @@ if __name__ == "__main__":
         if val: args.loops = max(0, int(val))
     except Exception: pass
 
-    try:
-        val = input("Start time HH:MM (enter = now): ").strip()
-        start_time = val if val else None
-    except Exception:
-        start_time = None
-
-    try:
-        val = input("End time HH:MM (enter = none): ").strip()
-        end_time = val if val else None
-    except Exception:
-        end_time = None
-
     threads  = min(MAX_THREADS, max(1, args.threads))
     loops    = max(0, args.loops)
-    headless = bool(args.headless)
     use_edge = bool(args.edge)
 
-    start_ts = _parse_hhmm(start_time)
-    end_ts   = _parse_hhmm(end_time)
-    if start_ts: _wait_until(start_ts)
-    END_TS_GLOBAL = end_ts
-
     start_clock = time.time()
-    print(Fore.CYAN + f"▶ Starting {threads} thread(s); loops per thread = {loops or '∞'}; headless={headless}; browser={'Edge' if use_edge else 'Chrome'}")
-    if end_ts:
-        print(Fore.CYAN + f"⏱ Will stop starting new loops after {time.strftime('%H:%M', time.localtime(end_ts))}")
+    print(f"▶ Starting {threads} thread(s); loops per thread = {loops or '∞'}; browser={'Edge' if use_edge else 'Chrome'}")
 
     with ThreadPoolExecutor(max_workers=threads) as ex:
-        futs = [ex.submit(worker, i+1, loops, headless, use_edge) for i in range(threads)]
+        futs = [ex.submit(worker, i+1, loops, use_edge) for i in range(threads)]
         for _ in as_completed(futs):
             pass
 
     finish_clock = time.time()
-    print(Fore.CYAN + f"🕒 Started : {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(start_clock))}")
-    print(Fore.CYAN + f"🕒 Finished: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(finish_clock))}")
-    print(Fore.GREEN + f"🧮 Total votes (all threads): {_global_submit_count}")
-    print(Fore.CYAN + f"🏁 All threads finished in {finish_clock - start_clock:.1f}s")
+    print(f"🕒 Started : {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(start_clock))}")
+    print(f"🕒 Finished: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(finish_clock))}")
+    print(f"🧮 Total votes (all threads): {_global_submit_count}")
+    print(f"🏁 All threads finished in {finish_clock - start_clock:.1f}s")
     sys.exit(0)
