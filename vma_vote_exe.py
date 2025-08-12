@@ -1,15 +1,20 @@
 # vma_vote_exe.py — Multi-threaded voter (Jimin-only)
-# Features: real-name emails only, smaller window size, interactive EXE prompts,
-# start/end scheduling, total-vote aggregation, robust "Submit" modal logic,
-# max threads limited to 6, and colored console output.
+# Real-name emails only, smaller window, interactive prompts, start/end scheduling,
+# total-vote aggregation, robust Submit modal, max threads = 6, and OPTIONAL color output.
 
 import time, random, re, sys, argparse, threading
 from typing import Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# ---------- Color Output ----------
-from colorama import Fore, Style, init
-init(autoreset=True)
+# ---------- Color Output (optional) ----------
+try:
+    from colorama import Fore, Style, init as _cinit
+    _cinit(autoreset=True)
+except Exception:
+    # Fallback: define no-op colors so the script runs even if colorama isn't present
+    class _NoColor:
+        def __getattr__(self, _): return ""
+    Fore = Style = _NoColor()
 
 # ---------- Selenium & Drivers ----------
 from selenium import webdriver
@@ -29,7 +34,7 @@ from webdriver_manager.microsoft import EdgeChromiumDriverManager
 VOTE_URL = "https://www.mtv.com/vma/vote"
 CATEGORY_ID = "#accordion-button-best-k-pop"
 ARTIST_X_H3 = "//h3[translate(normalize-space(.),'JIMIN','jimin')='jimin']"
-MAX_THREADS = 6  # Limit threads to 6 max
+MAX_THREADS = 6  # hard cap
 
 # ---------- Globals ----------
 _global_submit_count = 0
