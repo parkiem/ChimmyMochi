@@ -106,7 +106,7 @@ def gen_email():
     fn = random.choice(FIRST)
     ln = random.choice(LAST)
     num = random.randint(1000, 99999)
-    return f"{fn}.{ln}.{num}@{random.choice(DOMAINS)}".lower()
+    return f"{fn}{ln}{num}@{random.choice(DOMAINS)}".lower()
 
 # ---------- Core flow (per thread) ----------
 def worker(worker_id: int, loops: int, use_edge: bool, win_size: str, win_pos: str):
@@ -229,17 +229,13 @@ def worker(worker_id: int, loops: int, use_edge: bool, win_size: str, win_pos: s
         except NoSuchElementException:
             return False
 
-       # --- HUMAN-LIKE ADD-VOTE CLICKS (adaptive to site limit) ---
-          max_votes = detect_vote_limit(driver)  # reads 10, 20, etc. from the page
-          safety_extra = 2                       # click a couple extra to ensure all register
-          for _ in range(max_votes + safety_extra):
-          try:
-          driver.execute_script("arguments[0].click();", add_btn)
-          except WebDriverException:
-          pass
-          time.sleep(random.uniform(0.12, 0.20))  # 120–200 ms spacing
-
-
+        # --- HUMAN-LIKE ADD-VOTE CLICKS ---
+        for _ in range(12):  # a couple extra; site caps at 10
+            try:
+                driver.execute_script("arguments[0].click();", add_btn)
+            except WebDriverException:
+                pass
+            time.sleep(random.uniform(0.12, 0.20))  # 120–200 ms spacing
 
         # --- FAST SUBMIT DETECTION & CLICK ---
         def click_submit_modal():
@@ -372,4 +368,6 @@ if __name__ == "__main__":
 
     finally:
         _pause_exit()
-        sys.exit(0)
+        sys.exit(0) 
+
+
