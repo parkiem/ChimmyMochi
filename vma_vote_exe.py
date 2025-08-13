@@ -1,7 +1,7 @@
 # vma_vote_exe.py — Multi-threaded voter (Jimin-only)
 # Real-name emails only, smaller window, prompts only for threads & loops,
 # starts immediately and ends when loops complete, total-vote aggregation,
-# robust Submit modal, max threads = 6, no colorama.
+# robust Submit modal, max threads = 6, no colorama, Selenium 4 Service() fix.
 
 import time, random, re, sys, argparse, threading
 from typing import Optional
@@ -12,6 +12,8 @@ from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options as ChromeOptions
 from selenium.webdriver.edge.options import Options as EdgeOptions
+from selenium.webdriver.chrome.service import Service as ChromeService
+from selenium.webdriver.edge.service import Service as EdgeService
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import (
@@ -20,13 +22,6 @@ from selenium.common.exceptions import (
 )
 from webdriver_manager.chrome import ChromeDriverManager
 from webdriver_manager.microsoft import EdgeChromiumDriverManager
-
-def _pause_exit():
-    try:
-        input("\nPress Enter to close...")
-    except Exception:
-        pass
-
 
 # ---------- Config ----------
 VOTE_URL = "https://www.mtv.com/vma/vote"
@@ -39,6 +34,13 @@ _global_submit_count = 0
 _submit_lock = threading.Lock()
 _counter_lock = threading.Lock()
 _global_vote_no = 0
+
+# ---------- Helper to pause before exit ----------
+def _pause_exit():
+    try:
+        input("\nPress Enter to close...")
+    except Exception:
+        pass
 
 # ---------- CLI ----------
 def parse_args():
@@ -99,15 +101,18 @@ def gen_email():
 # ---------- Core flow (per thread) ----------
 def worker(worker_id: int, loops: int, use_edge: bool=False):
     opts = EdgeOptions() if use_edge else ChromeOptions()
-    opts.add_argument("--window-size=800,600")  # visible, smaller window
+    # visible, smaller window (also sets viewport in headless if you add it later)
+    opts.add_argument("--window-size=800,600")
     for a in ["--disable-logging","--log-level=3","--no-default-browser-check","--disable-background-networking"]:
         opts.add_argument(a)
 
     try:
         if use_edge:
-            driver = webdriver.Edge(EdgeChromiumDriverManager().install(), options=opts)
+            service = EdgeService(EdgeChromiumDriverManager().install())
+            driver = webdriver.Edge(service=service, options=opts)
         else:
-            driver = webdriver.Chrome(ChromeDriverManager().install(), options=opts)
+            service = ChromeService(ChromeDriverManager().install())
+            driver = webdriver.Chrome(service=service, options=opts)
     except Exception as e:
         print(f"[T{worker_id}] ❌ Unable to start browser: {e}")
         return
@@ -143,13 +148,13 @@ def worker(worker_id: int, loops: int, use_edge: bool=False):
         logged = False
         for _ in range(40):
             try:
-                btn = driver.find_element(By.XPATH, "//button[normalize-space(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'))='log in']")
+                b = driver.find_element(By.XPATH, "//button[normalize-space(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'))='log in']")
             except NoSuchElementException:
                 try:
-                    btn = driver.find_element(By.XPATH, "//button[contains(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'log in')]")
+                    b = driver.find_element(By.XPATH, "//button[contains(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'log in')]")
                 except NoSuchElementException:
-                    btn = None
-            if btn and safe_click(driver, btn):
+                    b = None
+            if b and safe_click(driver, b):
                 logged = True
                 break
             time.sleep(0.15)
@@ -310,7 +315,7 @@ if __name__ == "__main__":
     try:
         args = parse_args()
 
-        # prompts
+        # prompt only threads & loops
         try:
             val = input(f"Threads (max {MAX_THREADS}) [{args.threads}]: ").strip()
             if val:
@@ -320,8 +325,7 @@ if __name__ == "__main__":
 
         try:
             val = input(f"Loops per thread (0 = infinite) [{args.loops}]: ").strip()
-            if val:
-                args.loops = max(0, int(val))
+            if val: args.loops = max(0, int(val))
         except Exception:
             pass
 
@@ -332,7 +336,6 @@ if __name__ == "__main__":
         start_clock = time.time()
         print(f"▶ Starting {threads} thread(s); loops per thread = {loops or '∞'}; browser={'Edge' if use_edge else 'Chrome'}")
 
-        from concurrent.futures import ThreadPoolExecutor, as_completed
         with ThreadPoolExecutor(max_workers=threads) as ex:
             futs = [ex.submit(worker, i+1, loops, use_edge) for i in range(threads)]
             for _ in as_completed(futs):
@@ -345,7 +348,6 @@ if __name__ == "__main__":
         print(f"🏁 All threads finished in {finish_clock - start_clock:.1f}s")
 
     except Exception as e:
-        # show any fatal errors instead of instantly closing
         import traceback
         print("\n=== FATAL ERROR ===")
         traceback.print_exc()
