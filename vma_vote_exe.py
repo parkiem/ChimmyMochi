@@ -1,329 +1,459 @@
-# vma_vote_exe.py — Jimin-only, multi-thread (max 20), flexible vote counting
-# Shows actual votes per loop and per-thread totals; prints grand total at the end.
-# Examples:
-#   vma_vote_exe.exe
-#   vma_vote_exe.exe --threads 3 --loops 10
-#   vma_vote_exe.exe --threads 5 --loops 0 --headless
+# vma_vote_exe.py — Stable flow + human-like delays + anti-throttle (tiny visible window)
+# UPDATES:
+# - Flexible vote count (reads page / stops at cap) — no fixed “10”.
+# - Per-thread loop counts: enter one number for all, or comma-separated list (e.g. 5,3,8).
+#
+# Other behavior kept:
+# - Visible browser (no headless). Small 480x360 window; moved to (0,0). Do NOT minimize.
+# - Anti-throttling flags so it keeps running even if the window is covered/behind others.
+# - Prompts for threads & loops; starts immediately.
+# - Real-name email generator; prints the email used every loop.
+# - Fast Submit detection (50 ms polling + tiny backoff).
+# - Logout/reset: short 1.0–1.8 s + extra human pause 2.5–6.5 s between accounts.
+# - Selenium 4 Service() API. Max threads = 10. Pause before exit.
 
-import time, random, sys, re, argparse
-from typing import Set, Tuple
+import time, random, re, sys, argparse, threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+# ---------- Selenium & Drivers ----------
 from selenium import webdriver
 from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.options import Options as ChromeOptions
+from selenium.webdriver.edge.options import Options as EdgeOptions
+from selenium.webdriver.chrome.service import Service as ChromeService
+from selenium.webdriver.edge.service import Service as EdgeService
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import (
     TimeoutException, NoSuchElementException, ElementClickInterceptedException,
     StaleElementReferenceException, WebDriverException
 )
-
 from webdriver_manager.chrome import ChromeDriverManager
 from webdriver_manager.microsoft import EdgeChromiumDriverManager
-from selenium.webdriver.chrome.service import Service as ChromeService
-from selenium.webdriver.edge.service import Service as EdgeService
-from selenium.webdriver.chrome.options import Options as ChromeOptions
-from selenium.webdriver.edge.options import Options as EdgeOptions
 
-VOTE_URL = "https://www.mtv.com/event/vma/vote/"
+# ---------- Config ----------
+VOTE_URL = "https://www.mtv.com/vma/vote"
+CATEGORY_ID = "#accordion-button-best-k-pop"
+ARTIST_X_H3 = "//h3[translate(normalize-space(.),'JIMIN','jimin')='jimin']"
+MAX_THREADS = 100  # hard cap
 
-# ----- Email generator: first.last####@domain -----
-FIRST_NAMES = [
-    "john","michael","sarah","emily","david","chris","anna","lisa","mark","paul",
-    "james","laura","peter","susan","robert","nancy","kevin","mary","brian","julia",
-    "alex","joshua","olivia","matthew","daniel","jennifer","thomas","andrew","stephanie","karen",
-    "tyler","nicole","heather","eric","amanda","ryan","brandon","rachel","jason","patrick",
-    "victoria","kimberly","melissa","ashley","brittany","helen","timothy","catherine","dennis","jacob",
-    "ethan","zoe","nathan","grace","henry","noah","ava","mia","isabella","sophia",
-    "oliver","liam","charlotte","amelia","ella","harper","scarlett","lily","abigail","aubrey"
-]
-LAST_NAMES = [
-    "smith","johnson","williams","brown","jones","miller","davis","garcia","rodriguez","wilson",
-    "martinez","anderson","taylor","thomas","hernandez","moore","martin","lee","perez","thompson",
-    "white","harris","sanchez","clark","ramirez","lewis","robinson","walker","young","allen",
-    "king","wright","scott","torres","nguyen","hill","flores","green","adams","nelson",
-    "baker","hall","rivera","campbell","mitchell","carter","roberts","gomez","phillips","evans",
-    "turner","parker","edwards","collins","stewart","morris","murphy","cook","rogers","reed"
-]
-DOMAINS = ["gmail.com", "outlook.com", "yahoo.com", "aol.com", "icloud.com", "hotmail.com"]
+# ---------- Globals ----------
+_global_submit_count = 0
+_submit_lock = threading.Lock()
+_counter_lock = threading.Lock()
+_global_vote_no = 0
 
-def generate_unique_email(used: Set[str]) -> str:
-    while True:
-        first = random.choice(FIRST_NAMES)
-        last  = random.choice(LAST_NAMES)
-        num   = random.randint(100, 9999)  # 3 digits
-        email = f"{first}{last}{num}@{random.choice(DOMAINS)}"
-        if email not in used:
-            used.add(email)
-            return email
-
-# ----- Helpers -----
-def rdelay(a: float, b: float):
-    time.sleep(random.uniform(a, b))
-
-def safe_click(driver, el) -> bool:
+# ---------- Helper to pause before exit ----------
+def _pause_exit():
     try:
+        input("\nPress Enter to close...")
+    except Exception:
+        pass
+
+# ---------- CLI ----------
+def parse_args():
+    parser = argparse.ArgumentParser(description=f"VMA voter (Selenium, multi-thread, max threads = {MAX_THREADS})")
+    parser.add_argument("--threads", type=int, default=1, help=f"Number of parallel threads (max {MAX_THREADS})")
+    # NOTE: loops is still accepted from CLI, but we also prompt interactively (and support comma list)
+    parser.add_argument("--loops", type=int, default=1, help="Loops per thread (0 = infinite) — overridden by interactive input")
+    parser.add_argument("--edge", action="store_true", help="Use Edge instead of Chrome")
+    # Optional: override window size/position without editing code
+    parser.add_argument("--win", default="480,360", help="Window size WxH (default 480,360)")
+    parser.add_argument("--pos", default="0,0", help="Window position X,Y (default 0,0)")
+    return parser.parse_args()
+
+# ---------- Small utils ----------
+def rdelay(a=0.08, b=0.16): time.sleep(random.uniform(a, b))
+
+def safe_click(driver, el):
+    try:
+        driver.execute_script("arguments[0].scrollIntoView({behavior:'instant',block:'center'});", el)
+        time.sleep(0.02)
         el.click()
         return True
-    except (ElementClickInterceptedException, StaleElementReferenceException, WebDriverException):
+    except (ElementClickInterceptedException, WebDriverException):
         try:
-            driver.execute_script("arguments[0].click()", el)
+            driver.execute_script("arguments[0].click();", el)
             return True
-        except Exception:
+        except WebDriverException:
             return False
 
-def wait_css(driver, css, timeout=15):
+def wait_css(driver, sel, timeout=8):
     try:
-        return WebDriverWait(driver, timeout).until(EC.presence_of_element_located((By.CSS_SELECTOR, css)))
+        return WebDriverWait(driver, timeout).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, sel))
+        )
     except TimeoutException:
         return None
 
-def find_first_text_button(driver, *texts):
-    for t in texts:
+def quick_wait(driver, condition, timeout=6.0, poll=0.05):
+    return WebDriverWait(driver, timeout, poll_frequency=poll).until(condition)
+
+def next_vote_no() -> int:
+    global _global_vote_no
+    with _counter_lock:
+        _global_vote_no += 1
+        return _global_vote_no
+
+def parse_loops_input(raw: str, threads: int):
+    """
+    Accepts:
+      - single int -> apply to all threads
+      - comma list -> per-thread loop counts; pad with last value if fewer than threads
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return [0] * threads  # default: infinite
+    if "," in raw:
+        parts = []
+        for tok in raw.split(","):
+            tok = tok.strip()
+            if not tok:
+                continue
+            try:
+                parts.append(max(0, int(tok)))
+            except:
+                parts.append(0)
+        if not parts:
+            parts = [0]
+        # pad to thread count using last value
+        while len(parts) < threads:
+            parts.append(parts[-1])
+        # trim if longer than threads
+        return parts[:threads]
+    else:
         try:
-            el = WebDriverWait(driver, 1).until(
-                EC.presence_of_element_located((By.XPATH,
-                    f"//button[translate(normalize-space(.),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz')="
-                    f"translate('{t}','ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz')]"))
-            )
-            return el
-        except TimeoutException:
-            continue
-    return None
+            v = max(0, int(raw))
+        except:
+            v = 0
+        return [v] * threads
 
-def click_submit_modal(driver, tries=60, gap=0.15):
-    """
-    Click the 'Submit' button in the '10 votes distributed' modal by text or close variants.
-    """
-    xpath_text_submit = "//button[normalize-space(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'))='submit']"
-    xpath_any_submit_like = ("//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'submit') "
-                             "or contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'confirm') "
-                             "or contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'continue')]")
-    for _ in range(tries):
-        for xp in (xpath_text_submit, xpath_any_submit_like):
-            els = driver.find_elements(By.XPATH, xp)
-            for el in els:
-                try:
-                    if el.is_enabled():
-                        if safe_click(driver, el):
-                            return True
-                except Exception:
-                    pass
-        time.sleep(gap)
-    return False
+# ---------- Real-name email generator ----------
+FIRST = ["john","michael","sarah","emily","david","chris","anna","lisa","mark","paul","james","laura",
+         "peter","susan","robert","nancy","kevin","mary","brian","julia","alex","joshua","olivia","matthew",
+         "daniel","jennifer","thomas","andrew","stephanie","karen","tyler","nicole","heather","eric","amanda",
+         "ryan","brandon","rachel","jason","patrick","victoria","kimberly","melissa","ashley","brittany","helen",
+         "timothy","catherine","dennis","jacob","ethan","zoe","nathan","grace","henry","noah","ava","mia",
+         "isabella","sophia"]
+LAST = ["smith","johnson","williams","brown","jones","miller","davis","garcia","rodriguez","martinez",
+        "hernandez","lopez","gonzalez","wilson","anderson","thomas","taylor","moore","jackson","martin",
+        "lee","thompson","white","harris","sanchez","clark","ramirez","lewis","robinson","walker"]
+DOMAINS = ["gmail.com","outlook.com","yahoo.com","icloud.com","aol.com"]
 
-def make_driver(headless: bool):
-    # Try Chrome first, fallback to Edge
+def gen_email():
+    fn = random.choice(FIRST)
+    ln = random.choice(LAST)
+    num = random.randint(1000, 99999)
+    return f"{fn}{ln}{num}@{random.choice(DOMAINS)}".lower()
+
+# ---------- Core flow (per thread) ----------
+def worker(worker_id: int, loops_for_this_thread: int, use_edge: bool, win_size: str, win_pos: str):
+    # Parse size/pos args
     try:
-        co = ChromeOptions()
-        if headless: co.add_argument("--headless=new")
-        co.add_argument("--disable-blink-features=AutomationControlled")
-        co.add_argument("--disable-features=IsolateOrigins,site-per-process")
-        co.add_argument("--start-maximized")
-        return webdriver.Chrome(service=ChromeService(ChromeDriverManager().install()), options=co)
+        w, h = [int(x) for x in win_size.split(",")]
     except Exception:
-        eo = EdgeOptions()
-        if headless: eo.add_argument("--headless=new")
-        eo.add_argument("--disable-blink-features=AutomationControlled")
-        eo.add_argument("--disable-features=IsolateOrigins,site-per-process")
-        eo.add_argument("--start-maximized")
-        return webdriver.Edge(service=EdgeService(EdgeChromiumDriverManager().install()), options=eo)
-
-# ---------- Flexible voting (returns *actual* votes added this loop) ----------
-def vote_jimin_only(driver) -> int:
-    """
-    Returns the actual number of votes added this loop (0..10).
-    """
-    # Open K-pop accordion
-    btn = wait_css(driver, "#accordion-button-best-k-pop", 5)
-    if not btn:
-        return 0
-    driver.execute_script("arguments[0].scrollIntoView({behavior:'smooth',block:'center'});", btn)
-    rdelay(0.8, 1.5)
-    if (btn.get_attribute("aria-expanded") or "").lower() != "true":
-        safe_click(driver, btn); rdelay(1.0, 1.6)
-
-    # Ensure Jimin visible
+        w, h = 480, 360
     try:
-        WebDriverWait(driver, 5).until(
-            EC.presence_of_element_located((By.XPATH, "//h3[translate(normalize-space(.),'JIMIN','jimin')='jimin']"))
-        )
-    except TimeoutException:
-        return 0
+        x, y = [int(x) for x in win_pos.split(",")]
+    except Exception:
+        x, y = 0, 0
 
-    # The Add Vote button near Jimin
+    # Options: visible small window, anti-throttle flags
+    opts = EdgeOptions() if use_edge else ChromeOptions()
+    opts.add_argument(f"--window-size={w},{h}")
+    for a in [
+        "--disable-logging",
+        "--log-level=3",
+        "--no-default-browser-check",
+        "--disable-background-networking",
+        "--disable-background-timer-throttling",
+        "--disable-backgrounding-occluded-windows",
+        "--disable-renderer-backgrounding",
+    ]:
+        opts.add_argument(a)
+
+    # Selenium 4 Service
     try:
-        add_btn = driver.find_element(By.XPATH, "(//h3[translate(normalize-space(.),'JIMIN','jimin')='jimin']/following::button[@aria-label='Add Vote'])[1]")
-    except NoSuchElementException:
-        return 0
+        if use_edge:
+            service = EdgeService(EdgeChromiumDriverManager().install())
+            driver = webdriver.Edge(service=service, options=opts)
+        else:
+            service = ChromeService(ChromeDriverManager().install())
+            driver = webdriver.Chrome(service=service, options=opts)
+        # keep it visible but tucked in a corner; do NOT minimize
+        try:
+            driver.set_window_position(x, y)
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"[T{worker_id}] ❌ Unable to start browser: {e}")
+        return
 
-    # Optional nearby counter to detect stagnation
-    try:
-        counter_el = driver.find_element(By.XPATH, "(//h3[translate(normalize-space(.),'JIMIN','jimin')='jimin']/following::p[contains(@class,'chakra-text')])[1]")
-    except NoSuchElementException:
-        counter_el = None
+    def login():
+        try:
+            driver.get(VOTE_URL)
+        except WebDriverException as e:
+            print(f"[T{worker_id}] nav error: {e}")
+            return False, None
+        print(f"[T{worker_id}] ▶ started")
 
-    last_count = -1
-    stagnant = 0
-    real_votes = 0
+        rdelay(0.6, 1.0)
+        try:
+            btn = driver.find_element(By.CSS_SELECTOR, "button[aria-label='Add Vote']")
+            safe_click(driver, btn)
+            rdelay(0.4, 0.7)
+        except NoSuchElementException:
+            pass
 
-    while True:
-        aria_dis = (add_btn.get_attribute("aria-disabled") or "").lower()
-        if aria_dis == "true":
-            break
+        # email field for modal/full-page login
+        try:
+            email_input = driver.find_element(By.XPATH, "//input[@type='email' or starts-with(@id,'field-:')]")
+        except NoSuchElementException:
+            return True, None
 
-        if not safe_click(driver, add_btn):
-            break
+        addr = gen_email()
+        try:
+            email_input.clear()
+            email_input.send_keys(addr)
+        except WebDriverException:
+            return False, None
 
-        real_votes += 1
-        rdelay(0.09, 0.16)
-
-        if counter_el:
+        # click "Log in" (handles both 'Log in' and 'Login' etc.)
+        logged = False
+        for _ in range(50):
             try:
-                txt = counter_el.text or ""
-                m = re.search(r"\d+", txt)
-                if m:
-                    n = int(m.group(0))
-                    if n == last_count:
-                        stagnant += 1
-                    else:
-                        stagnant, last_count = 0, n
-                    if stagnant >= 3:
-                        break
-            except StaleElementReferenceException:
-                pass
-
-        if real_votes >= 10:  # MTV per-loop cap
-            break
-
-    # Try to click the modal's Submit if it appears
-    click_submit_modal(driver)
-    return real_votes
-
-# ---------- Worker (returns: thread_id, per-thread total votes cast) ----------
-def worker(thread_id: int, loops: int, headless: bool) -> Tuple[int, int]:
-    used_emails: Set[str] = set()
-    current_loop = 0
-    thread_total = 0
-    driver = None
-    try:
-        time.sleep(random.uniform(0.2, 1.2))  # stagger start
-        driver = make_driver(headless)
-        driver.get(VOTE_URL)
-        print(f"[T{thread_id}] ▶ started")
-
-        def login() -> bool:
-            add_btn = wait_css(driver, 'button[aria-label="Add Vote"]', 15)
-            if not add_btn:
-                print(f"[T{thread_id}] ⚠️ Add Vote not found")
-                return False
-            rdelay(0.5, 1.5)
-            safe_click(driver, add_btn)
-
-            rdelay(0.8, 1.6)
-            try:
-                email_input = WebDriverWait(driver, 10).until(
-                    EC.element_to_be_clickable((By.CSS_SELECTOR, 'input[id^="field-:"]'))
-                )
-            except TimeoutException:
-                print(f"[T{thread_id}] ⚠️ Email input not found")
-                return False
-
-            email = generate_unique_email(used_emails)
-            email_input.click(); email_input.clear(); email_input.send_keys(email)
-            rdelay(0.4, 0.9)
-
-            btn = find_first_text_button(driver, "Log in", "log in")
-            if btn:
-                safe_click(driver, btn)
-            rdelay(1.2, 2.0)
-            return True
-
-        def logout_and_wait():
-            rdelay(1.5, 2.5)
-            logout_btn = None
-            try:
-                logout_btn = driver.find_element(By.CSS_SELECTOR, "button.chakra-button.AuthNav__login-btn.css-ki1yvo")
+                btn = driver.find_element(By.XPATH, "//button[normalize-space(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'))='log in']")
             except NoSuchElementException:
                 try:
-                    logout_btn = driver.find_element(By.XPATH, "//*[@id='root']//main//button[contains(.,'Log out') or contains(.,'Logout')]")
+                    btn = driver.find_element(By.XPATH, "//button[contains(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'log in')]")
                 except NoSuchElementException:
-                    pass
-            if logout_btn:
-                safe_click(driver, logout_btn)
+                    btn = None
+            if btn and safe_click(driver, btn):
+                logged = True
+                break
+            time.sleep(0.08)
+        if not logged:
+            print(f"[T{worker_id}] ⚠️ could not click Log in")
+            return False, None
 
-            gap = random.randint(1000, 3000) + random.randint(2000, 3000)
-            time.sleep(gap/1000.0)
+        # wait until the email form is gone
+        try:
+            WebDriverWait(driver, 8).until_not(
+                EC.presence_of_element_located((By.XPATH, "//input[@type='email' or starts-with(@id,'field-:')]"))
+            )
+        except TimeoutException:
+            print(f"[T{worker_id}] ⚠️ email form stuck")
+            return False, None
+        return True, addr
 
+    def open_section():
+        btn = wait_css(driver, CATEGORY_ID, 6)
+        if not btn: return False
+        driver.execute_script("arguments[0].scrollIntoView({behavior:'instant',block:'center'});", btn)
+        time.sleep(random.uniform(0.30, 0.50))
+        if (btn.get_attribute("aria-expanded") or "").lower() != "true":
+            safe_click(driver, btn)
+            time.sleep(random.uniform(0.50, 0.80))
+        return True
+
+    def vote_jimin_only_and_count() -> int:
+        """
+        Clicks Add Vote repeatedly and returns the ACTUAL number registered (0..cap).
+        Stops if button disables or nearby counter stops increasing.
+        Also clicks the Submit button in the modal if it appears.
+        """
+        if not open_section(): return 0
+        try:
+            WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.XPATH, ARTIST_X_H3)))
+        except TimeoutException:
+            return 0
+
+        # The Add Vote button near Jimin
+        try:
+            add_btn = driver.find_element(By.XPATH, f"({ARTIST_X_H3}/following::button[@aria-label='Add Vote'])[1]")
+        except NoSuchElementException:
+            return 0
+
+        # Optional nearby counter to detect stagnation
+        try:
+            counter_el = driver.find_element(By.XPATH, f"({ARTIST_X_H3}/following::p[contains(@class,'chakra-text')])[1]")
+        except NoSuchElementException:
+            counter_el = None
+
+        last_count = -1
+        stagnant = 0
+        real_votes = 0
+
+        # Click loop — flexible, not fixed to 10
         while True:
-            if loops != 0 and current_loop >= loops:
+            aria_dis = (add_btn.get_attribute("aria-disabled") or "").lower()
+            if aria_dis == "true":
+                break
+
+            if not safe_click(driver, add_btn):
+                break
+
+            real_votes += 1
+            time.sleep(random.uniform(0.12, 0.20))  # keep your human-like spacing
+
+            if counter_el:
+                try:
+                    txt = counter_el.text or ""
+                    m = re.search(r"\d+", txt)
+                    if m:
+                        n = int(m.group(0))
+                        if n == last_count:
+                            stagnant += 1
+                        else:
+                            stagnant, last_count = 0, n
+                        if stagnant >= 3:  # no movement after several clicks -> stop
+                            break
+                except StaleElementReferenceException:
+                    pass
+
+            # hard safety upper bound to avoid runaway if UI changes drastically
+            if real_votes >= 20:
+                break
+
+        # --- FAST SUBMIT DETECTION & CLICK ---
+        def click_submit_modal():
+            MODAL_SCOPE = "//*[@role='dialog' or contains(@id,'chakra-modal')]"
+            X_EQ  = MODAL_SCOPE + "//button[normalize-space(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'))='submit']"
+            X_HAS = MODAL_SCOPE + "//button[contains(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'submit')]"
+
+            btn = None
+            # poll quickly (50ms) up to 6s in total
+            for xp, to in [(X_EQ, 6), (X_HAS, 4),
+                           ("//button[normalize-space(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'))='submit']", 2),
+                           ("//button[contains(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'submit')]", 2)]:
+                try:
+                    btn = quick_wait(driver, EC.element_to_be_clickable((By.XPATH, xp)), timeout=to, poll=0.05)
+                    break
+                except TimeoutException:
+                    btn = None
+            if not btn:
+                return False
+
+            # small backoff if still animating, then JS click
+            try:
+                driver.execute_script("return arguments[0].offsetParent !== null", btn)
+                time.sleep(0.03)
+            except Exception:
+                pass
+            try:
+                driver.execute_script("arguments[0].click();", btn)
+                return True
+            except WebDriverException:
+                return safe_click(driver, btn)
+
+        click_submit_modal()
+        return real_votes
+
+    def logout_and_wait():
+        # Short cool-off to avoid hammering
+        time.sleep(random.uniform(1.0, 1.8))
+        # Try logout button if present; otherwise just clear & reload
+        try:
+            b = driver.find_element(By.CSS_SELECTOR, "button.chakra-button.AuthNav__login-btn.css-ki1yvo")
+            safe_click(driver, b)
+        except NoSuchElementException:
+            try:
+                b = driver.find_element(By.XPATH, "//button[contains(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'log out')]")
+                safe_click(driver, b)
+            except NoSuchElementException:
+                try:
+                    driver.execute_script("window.localStorage.clear(); window.sessionStorage.clear();")
+                    driver.get(VOTE_URL)
+                except Exception:
+                    pass
+        # Extra human-like pause before next account
+        time.sleep(random.uniform(2.5, 6.5))
+
+    # --------- Main per-thread loop ----------
+    current_loop = 0
+    try:
+        while True:
+            if loops_for_this_thread != 0 and current_loop >= loops_for_this_thread:
                 break
             current_loop += 1
 
-            if not login():
-                print(f"[T{thread_id}] ⚠️ login failed")
-                break
+            ok, email = login()
+            if not ok:
+                print(f"[T{worker_id}] ⚠️ login failed"); break
 
-            added = vote_jimin_only(driver)  # <-- flexible count
-            thread_total += added
-            print(f"[T{thread_id}] Loop {current_loop}: added {added} vote(s) — thread total = {thread_total}")
+            added = vote_jimin_only_and_count()
+            with _submit_lock:
+                global _global_submit_count
+                _global_submit_count += added
+
+            vno = next_vote_no()
+            print(f"[T{worker_id}] ✅ Submitted {added} vote(s) (#{vno}) | {email or 'N/A'}")
 
             logout_and_wait()
 
-        return (thread_id, thread_total)
-
     finally:
         try:
-            if driver: driver.quit()
+            driver.quit()
         except Exception:
             pass
 
-# ----- CLI / entry -----
-def parse_args():
-    p = argparse.ArgumentParser(description="Jimin-only VMA voter (multi-threaded, flexible counting)")
-    p.add_argument("--threads", type=int, default=1, help="browsers in parallel (max 5)")
-    p.add_argument("--loops",   type=int, default=None, help="loops per thread (0 = infinite). If omitted, you will be prompted.")
-    p.add_argument("--headless", action="store_true", help="run without visible browser windows")
-    return p.parse_args()
-
+# ---------- Main ----------
 if __name__ == "__main__":
-    args = parse_args()
+    try:
+        args = parse_args()
 
-    # Cap threads at 5
-    threads = max(1, args.threads or 1)
-
-    # Prompt for loops if not provided
-    if args.loops is None:
+        # Prompt threads
         try:
-            raw = input("Loops per thread (0 = infinite): ").strip()
-            loops = int(raw or "0")
+            val = input(f"Threads (max {MAX_THREADS}) [{args.threads}]: ").strip()
+            if val:
+                args.threads = min(MAX_THREADS, max(1, int(val)))
         except Exception:
-            loops = 0
-    else:
-        loops = max(0, args.loops)
+            pass
 
-    headless = bool(args.headless)
+        threads  = min(MAX_THREADS, max(1, args.threads))
+        use_edge = bool(args.edge)
+        win_size = args.win
+        win_pos  = args.pos
 
-    start = time.time()
-    print(f"▶ Starting {threads} thread(s); loops per thread = {loops or '∞'}; headless={headless}")
+        # Prompt loops — supports single number OR comma-separated per-thread list
+        try:
+            hint = f"{args.loops}"
+            val = input(f"Loops per thread (0 = infinite). Single number OR comma-list for each thread [{hint}]: ").strip()
+            if not val:
+                # Use CLI default for all threads
+                loops_list = [max(0, args.loops)] * threads
+            else:
+                loops_list = parse_loops_input(val, threads)
+        except Exception:
+            loops_list = [0] * threads
 
-    per_thread = {}
-    with ThreadPoolExecutor(max_workers=threads) as ex:
-        futures = [ex.submit(worker, i+1, loops, headless) for i in range(threads)]
-        for fut in as_completed(futures):
-            tid, total = fut.result()
-            per_thread[tid] = total
+        start_clock = time.time()
+        print(f"▶ Starting {threads} thread(s); loops per thread = {loops_list}; browser={'Edge' if use_edge else 'Chrome'}; win={win_size}; pos={win_pos}")
 
-    elapsed = time.time() - start
+        with ThreadPoolExecutor(max_workers=threads) as ex:
+            futs = [ex.submit(worker, i+1, loops_list[i], use_edge, win_size, win_pos) for i in range(threads)]
+            for _ in as_completed(futs):
+                pass
 
-    # ----- Final summaries -----
-    print("\n===== Per-thread totals =====")
-    grand = 0
-    for tid in sorted(per_thread.keys()):
-        print(f"Thread {tid}: {per_thread[tid]} vote(s)")
-        grand += per_thread[tid]
-    print(f"Grand total: {grand} vote(s)")
-    print(f"Elapsed: {elapsed / 60:.2f} min")
+        finish_clock = time.time()
+        print(f"🕒 Started : {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(start_clock))}")
+        print(f"🕒 Finished: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(finish_clock))}")
+        print(f"🧮 Total votes (all threads): {_global_submit_count}")
+        elapsed = finish_clock - start_clock
+        if elapsed >= 3600:
+        print(f"🏁 All threads finished in {elapsed / 3600:.2f} hr")
+        elif elapsed >= 60:
+        print(f"🏁 All threads finished in {elapsed / 60:.2f} min")
+        else:
+        print(f"🏁 All threads finished in {elapsed:.1f} sec")
 
 
-    sys.exit(0)
+
+    except Exception:
+        import traceback
+        print("\n=== FATAL ERROR ===")
+        traceback.print_exc()
+
+    finally:
+        _pause_exit()
+        sys.exit(0)
