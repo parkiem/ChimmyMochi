@@ -453,11 +453,7 @@ if __name__ == "__main__":
     try:
         args = parse_args()
 
-        # start hotkey
-        start_hotkey_listener()
-        print("▶ Press ANY key to stop…")
-
-        # Prompt threads
+       # Prompt threads
         try:
             val = input(f"Threads (max {MAX_THREADS}) [{args.threads}]: ").strip()
             if val:
@@ -480,6 +476,10 @@ if __name__ == "__main__":
                 loops_list = parse_loops_input(val, threads)
         except Exception:
             loops_list = [0] * threads
+
+        # NOW start the hotkey listener (after prompts)
+        start_hotkey_listener()
+        print("▶ Press ANY key to stop…")
 
         start_clock = time.time()
         print(f"▶ Starting {threads} thread(s); loops per thread = {loops_list}; browser={'Edge' if use_edge else 'Chrome'}; win={win_size}; pos={win_pos}")
