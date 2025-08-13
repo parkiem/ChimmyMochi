@@ -31,13 +31,11 @@ from webdriver_manager.microsoft import EdgeChromiumDriverManager
 VOTE_URL = "https://www.mtv.com/vma/vote"
 CATEGORY_ID = "#accordion-button-best-k-pop"
 ARTIST_X_H3 = "//h3[translate(normalize-space(.),'JIMIN','jimin')='jimin']"
-MAX_THREADS = 10  # hard cap
+MAX_THREADS = 20  # hard cap
 
 # ---------- Globals ----------
 _global_submit_count = 0
 _submit_lock = threading.Lock()
-_counter_lock = threading.Lock()
-_global_vote_no = 0
 
 # ---------- Helper to pause before exit ----------
 def _pause_exit():
@@ -84,11 +82,47 @@ def wait_css(driver, sel, timeout=8):
 def quick_wait(driver, condition, timeout=6.0, poll=0.05):
     return WebDriverWait(driver, timeout, poll_frequency=poll).until(condition)
 
-def next_vote_no() -> int:
-    global _global_vote_no
-    with _counter_lock:
-        _global_vote_no += 1
-        return _global_vote_no
+def detect_vote_limit(driver):
+    """
+    Best-effort read of the page's per-submit vote cap (10, 20, etc.).
+    Returns an int; falls back to 10 if not found.
+    """
+    # 1) Look for a counter like "3/20", "0 / 10", etc.
+    try:
+        scopes = [
+            "//*[@role='dialog' or contains(@id,'chakra-modal')]",
+            "//*[contains(@class,'chakra')]",
+            "//*",
+        ]
+        for scope in scopes:
+            els = driver.find_elements(
+                By.XPATH,
+                f"{scope}[.//text()[contains(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'vote') or contains(text(),'/')]]"
+            )
+            for el in els:
+                t = (el.text or "").strip()
+                m = re.search(r'(\d+)\s*/\s*(\d+)', t)
+                if m:
+                    cap = int(m.group(2))
+                    if 1 <= cap <= 100:
+                        return cap
+    except Exception:
+        pass
+
+    # 2) Progressbar aria-valuemax fallback
+    try:
+        pbars = driver.find_elements(By.CSS_SELECTOR, '[role="progressbar"]')
+        for pb in pbars:
+            valmax = pb.get_attribute("aria-valuemax")
+            if valmax and valmax.isdigit():
+                cap = int(valmax)
+                if 1 <= cap <= 100:
+                    return cap
+    except Exception:
+        pass
+
+    # Fallback
+    return 10
 
 # ---------- Real-name email generator ----------
 FIRST = ["john","michael","sarah","emily","david","chris","anna","lisa","mark","paul","james","laura",
@@ -229,13 +263,16 @@ def worker(worker_id: int, loops: int, use_edge: bool, win_size: str, win_pos: s
         except NoSuchElementException:
             return False
 
-        # --- HUMAN-LIKE ADD-VOTE CLICKS ---
-        for _ in range(12):  # a couple extra; site caps at 10
-            try:
-                driver.execute_script("arguments[0].click();", add_btn)
-            except WebDriverException:
-                pass
-            time.sleep(random.uniform(0.12, 0.20))  # 120–200 ms spacing
+        # --- HUMAN-LIKE ADD-VOTE CLICKS (adaptive to site limit) ---
+         max_votes = detect_vote_limit(driver)   # e.g., 10 or 20
+         safety_extra = 2                        # click a couple extra to ensure all register
+         for _ in range(max_votes + safety_extra):
+             try:
+                 driver.execute_script("arguments[0].click();", add_btn)
+             except WebDriverException:
+                 pass
+             time.sleep(random.uniform(0.12, 0.20))
+
 
         # --- FAST SUBMIT DETECTION & CLICK ---
         def click_submit_modal():
@@ -270,6 +307,13 @@ def worker(worker_id: int, loops: int, use_edge: bool, win_size: str, win_pos: s
 
         click_submit_modal()
         return True
+
+       ok = click_submit_modal()
+       awarded = get_awarded_votes_from_ui(driver, timeout=6.0)
+       if awarded is None or not (1 <= awarded <= 100):
+         awarded = max_votes
+       return awarded if ok else 0
+
 
     def logout_and_wait():
         # Short cool-off to avoid hammering
