@@ -440,14 +440,13 @@ if __name__ == "__main__":
         print(f"🕒 Finished: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(finish_clock))}")
         print(f"🧮 Total votes (all threads): {_global_submit_count}")
         elapsed = finish_clock - start_clock
-        if elapsed >= 3600:
-        print(f"🏁 All threads finished in {elapsed / 3600:.2f} hr")
-        elif elapsed >= 60:
-        print(f"🏁 All threads finished in {elapsed / 60:.2f} min")
-        else:
-        print(f"🏁 All threads finished in {elapsed:.1f} sec")
 
-
+       if elapsed >= 3600:
+           print(f"\U0001f3c1 All threads finished in {elapsed / 3600:.2f} hr")
+       elif elapsed >= 60:
+           print(f"\U0001f3c1 All threads finished in {elapsed / 60:.2f} min")
+       else:
+           print(f"\U0001f3c1 All threads finished in {elapsed:.1f} sec")
 
     except Exception:
         import traceback
