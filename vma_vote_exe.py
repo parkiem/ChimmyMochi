@@ -1,12 +1,13 @@
-# vma_vote_exe.py — Stable + fast timing (long-run safe)
-# - Visible browser, prompts only for threads & loops
+# vma_vote_exe.py — Stable flow + human-like delays
+# - Visible browser (no headless)
+# - Prompts only for threads & loops; starts immediately
 # - Real-name email generator; prints the email used every loop
-# - Fast Add-Vote clicks (60–90 ms pacing, 12 attempts to guarantee 10)
-# - Fast Submit detection (50 ms polling, tiny backoff before click)
-# - Shorter reset between loops (~1.0–1.8 s)
+# - Add-Vote clicks slowed to 120–200 ms spacing (12 clicks to ensure 10 register)
+# - Fast Submit detection (50 ms polling + tiny backoff)
+# - Logout/reset: short 1.0–1.8 s + extra human pause 2.5–6.5 s between accounts
 # - Selenium 4 Service() API
 # - Max threads = 6
-# - Pause before exit
+# - Pause before exit so logs are visible
 
 import time, random, re, sys, argparse, threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -202,13 +203,13 @@ def worker(worker_id: int, loops: int, use_edge: bool=False):
         except NoSuchElementException:
             return False
 
-        # --- FAST, LONG-RUN-STABLE ADD-VOTE CLICKS ---
+        # --- SLOWER, HUMAN-LIKE ADD-VOTE CLICKS ---
         for _ in range(12):  # a couple extra; site caps at 10
             try:
                 driver.execute_script("arguments[0].click();", add_btn)
             except WebDriverException:
                 pass
-            time.sleep(random.uniform(0.06, 0.09))  # 60–90 ms spacing
+            time.sleep(random.uniform(0.12, 0.20))  # 120–200 ms spacing
 
         # --- FAST SUBMIT DETECTION & CLICK ---
         def click_submit_modal():
@@ -261,6 +262,8 @@ def worker(worker_id: int, loops: int, use_edge: bool=False):
                     driver.get(VOTE_URL)
                 except Exception:
                     pass
+        # --- NEW: human-like pause before next account ---
+        time.sleep(random.uniform(2.5, 6.5))
 
     # --------- Main per-thread loop ----------
     current_loop = 0
