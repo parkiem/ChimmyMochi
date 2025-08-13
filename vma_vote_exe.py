@@ -1,15 +1,16 @@
 # vma_vote_exe.py — Stable flow + human-like delays + anti-throttle (tiny visible window)
-# UPDATES:
-# - Flexible vote count (reads page / stops at cap) — no fixed “10”.
-# - Per-thread loop counts: enter one number for all, or comma-separated list (e.g. 5,3,8).
+# Fixes:
+# - Flexible vote count (10 or 20 depending on page). Stops on Submit modal / button disable / counter stall.
+# - Per-thread reporting (no global #sequence in log lines).
+# - Press ANY key to stop all threads immediately.
 #
 # Other behavior kept:
 # - Visible browser (no headless). Small 480x360 window; moved to (0,0). Do NOT minimize.
-# - Anti-throttling flags so it keeps running even if the window is covered/behind others.
-# - Prompts for threads & loops; starts immediately.
-# - Real-name email generator; prints the email used every loop.
+# - Anti-throttling flags.
+# - Prompts for threads & loops (single number or comma-separated per-thread list).
+# - Real-name email generator.
 # - Fast Submit detection (50 ms polling + tiny backoff).
-# - Logout/reset: short 1.0–1.8 s + extra human pause 2.5–6.5 s between accounts.
+# - Logout/reset: short 1.0–1.8 s + extra human pause 2.5–6.5 s.
 # - Selenium 4 Service() API. Max threads = 10. Pause before exit.
 
 import time, random, re, sys, argparse, threading
@@ -36,34 +37,22 @@ VOTE_URL = "https://www.mtv.com/vma/vote"
 CATEGORY_ID = "#accordion-button-best-k-pop"
 ARTIST_X_H3 = "//h3[translate(normalize-space(.),'JIMIN','jimin')='jimin']"
 MAX_THREADS = 100  # hard cap
+MAX_VOTES_PER_LOOP_SAFETY = 20  # absolute ceiling; page modal usually shows 10 or 20
 
 # ---------- Globals ----------
 _global_submit_count = 0
 _submit_lock = threading.Lock()
-_counter_lock = threading.Lock()
-_global_vote_no = 0
 
-# ---------- Helper to pause before exit ----------
-def _pause_exit():
-    try:
-        input("\nPress Enter to close...")
-    except Exception:
-        pass
-
-# ---------- CLI ----------
-def parse_args():
-    parser = argparse.ArgumentParser(description=f"VMA voter (Selenium, multi-thread, max threads = {MAX_THREADS})")
-    parser.add_argument("--threads", type=int, default=1, help=f"Number of parallel threads (max {MAX_THREADS})")
-    # NOTE: loops is still accepted from CLI, but we also prompt interactively (and support comma list)
-    parser.add_argument("--loops", type=int, default=1, help="Loops per thread (0 = infinite) — overridden by interactive input")
-    parser.add_argument("--edge", action="store_true", help="Use Edge instead of Chrome")
-    # Optional: override window size/position without editing code
-    parser.add_argument("--win", default="480,360", help="Window size WxH (default 480,360)")
-    parser.add_argument("--pos", default="0,0", help="Window position X,Y (default 0,0)")
-    return parser.parse_args()
+# stop-hotkey
+try:
+    import msvcrt  # Windows console single-key
+except Exception:
+    msvcrt = None
+stop_event = threading.Event()
 
 # ---------- Small utils ----------
-def rdelay(a=0.08, b=0.16): time.sleep(random.uniform(a, b))
+def rdelay(a=0.08, b=0.16):
+    time.sleep(random.uniform(a, b))
 
 def safe_click(driver, el):
     try:
@@ -89,12 +78,6 @@ def wait_css(driver, sel, timeout=8):
 def quick_wait(driver, condition, timeout=6.0, poll=0.05):
     return WebDriverWait(driver, timeout, poll_frequency=poll).until(condition)
 
-def next_vote_no() -> int:
-    global _global_vote_no
-    with _counter_lock:
-        _global_vote_no += 1
-        return _global_vote_no
-
 def parse_loops_input(raw: str, threads: int):
     """
     Accepts:
@@ -116,10 +99,8 @@ def parse_loops_input(raw: str, threads: int):
                 parts.append(0)
         if not parts:
             parts = [0]
-        # pad to thread count using last value
         while len(parts) < threads:
             parts.append(parts[-1])
-        # trim if longer than threads
         return parts[:threads]
     else:
         try:
@@ -127,6 +108,28 @@ def parse_loops_input(raw: str, threads: int):
         except:
             v = 0
         return [v] * threads
+
+def fmt_elapsed(s: float) -> str:
+    """Return elapsed time as 'X hr' / 'Y min' / 'Z sec' automatically."""
+    if s >= 3600:
+        return f"{s / 3600:.2f} hr"
+    if s >= 60:
+        return f"{s / 60:.2f} min"
+    return f"{s:.1f} sec"
+
+def start_hotkey_listener():
+    """Press ANY key (or Enter on non-Windows) to stop all threads."""
+    def _listen():
+        try:
+            if msvcrt:
+                msvcrt.getch()  # waits for one keypress
+            else:
+                input()
+        finally:
+            stop_event.set()
+            print("\n⛔ Stop requested — finishing current step…")
+    t = threading.Thread(target=_listen, daemon=True)
+    t.start()
 
 # ---------- Real-name email generator ----------
 FIRST = ["john","michael","sarah","emily","david","chris","anna","lisa","mark","paul","james","laura",
@@ -180,16 +183,18 @@ def worker(worker_id: int, loops_for_this_thread: int, use_edge: bool, win_size:
         else:
             service = ChromeService(ChromeDriverManager().install())
             driver = webdriver.Chrome(service=service, options=opts)
-        # keep it visible but tucked in a corner; do NOT minimize
         try:
-            driver.set_window_position(x, y)
+            driver.set_window_position(x, y)  # keep visible; do NOT minimize
         except Exception:
             pass
     except Exception as e:
         print(f"[T{worker_id}] ❌ Unable to start browser: {e}")
         return
 
+    thread_total = 0  # per-thread running total
+
     def login():
+        if stop_event.is_set(): return False, None
         try:
             driver.get(VOTE_URL)
         except WebDriverException as e:
@@ -198,10 +203,11 @@ def worker(worker_id: int, loops_for_this_thread: int, use_edge: bool, win_size:
         print(f"[T{worker_id}] ▶ started")
 
         rdelay(0.6, 1.0)
+        if stop_event.is_set(): return False, None
+
         try:
             btn = driver.find_element(By.CSS_SELECTOR, "button[aria-label='Add Vote']")
-            safe_click(driver, btn)
-            rdelay(0.4, 0.7)
+            safe_click(driver, btn); rdelay(0.4, 0.7)
         except NoSuchElementException:
             pass
 
@@ -213,14 +219,14 @@ def worker(worker_id: int, loops_for_this_thread: int, use_edge: bool, win_size:
 
         addr = gen_email()
         try:
-            email_input.clear()
-            email_input.send_keys(addr)
+            email_input.clear(); email_input.send_keys(addr)
         except WebDriverException:
             return False, None
 
-        # click "Log in" (handles both 'Log in' and 'Login' etc.)
+        # click "Log in" (handles 'Log in' / 'Login')
         logged = False
         for _ in range(50):
+            if stop_event.is_set(): return False, None
             try:
                 btn = driver.find_element(By.XPATH, "//button[normalize-space(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'))='log in']")
             except NoSuchElementException:
@@ -229,8 +235,7 @@ def worker(worker_id: int, loops_for_this_thread: int, use_edge: bool, win_size:
                 except NoSuchElementException:
                     btn = None
             if btn and safe_click(driver, btn):
-                logged = True
-                break
+                logged = True; break
             time.sleep(0.08)
         if not logged:
             print(f"[T{worker_id}] ⚠️ could not click Log in")
@@ -252,16 +257,16 @@ def worker(worker_id: int, loops_for_this_thread: int, use_edge: bool, win_size:
         driver.execute_script("arguments[0].scrollIntoView({behavior:'instant',block:'center'});", btn)
         time.sleep(random.uniform(0.30, 0.50))
         if (btn.get_attribute("aria-expanded") or "").lower() != "true":
-            safe_click(driver, btn)
-            time.sleep(random.uniform(0.50, 0.80))
+            safe_click(driver, btn); time.sleep(random.uniform(0.50, 0.80))
         return True
 
     def vote_jimin_only_and_count() -> int:
         """
-        Clicks Add Vote repeatedly and returns the ACTUAL number registered (0..cap).
-        Stops if button disables or nearby counter stops increasing.
-        Also clicks the Submit button in the modal if it appears.
+        Clicks Add Vote repeatedly and returns the ACTUAL number registered (0..10/20).
+        Stops on: Submit modal visible OR button disabled OR nearby counter stalls.
+        Hard safety ceiling at MAX_VOTES_PER_LOOP_SAFETY.
         """
+        if stop_event.is_set(): return 0
         if not open_section(): return 0
         try:
             WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.XPATH, ARTIST_X_H3)))
@@ -280,12 +285,37 @@ def worker(worker_id: int, loops_for_this_thread: int, use_edge: bool, win_size:
         except NoSuchElementException:
             counter_el = None
 
+        def submit_modal_visible_and_cap():
+            """Returns (visible, cap_int_or_None)."""
+            try:
+                # Search in any dialog for text mentioning 'votes'
+                modals = driver.find_elements(By.XPATH, "//*[@role='dialog' or contains(@id,'chakra-modal')]")
+                for m in modals:
+                    txt = (m.text or "").lower()
+                    if "vote" in txt:
+                        mm = re.search(r"(\d+)\s+vote", txt)
+                        cap = int(mm.group(1)) if mm else None
+                        # If there's a Submit button too, consider modal visible
+                        btns = m.find_elements(By.XPATH, ".//button")
+                        for b in btns:
+                            btxt = (b.text or "").strip().lower()
+                            if "submit" in btxt or "confirm" in btxt or "continue" in btxt:
+                                return True, cap
+                # As fallback, explicit submit button anywhere
+                btn = driver.find_elements(By.XPATH, "//button[normalize-space(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'))='submit']")
+                if btn: return True, None
+            except Exception:
+                pass
+            return False, None
+
+        real_votes = 0
         last_count = -1
         stagnant = 0
-        real_votes = 0
+        dynamic_cap = MAX_VOTES_PER_LOOP_SAFETY  # assume max; modal text may tell us 10
 
-        # Click loop — flexible, not fixed to 10
         while True:
+            if stop_event.is_set(): break
+
             aria_dis = (add_btn.get_attribute("aria-disabled") or "").lower()
             if aria_dis == "true":
                 break
@@ -294,7 +324,13 @@ def worker(worker_id: int, loops_for_this_thread: int, use_edge: bool, win_size:
                 break
 
             real_votes += 1
-            time.sleep(random.uniform(0.12, 0.20))  # keep your human-like spacing
+            time.sleep(random.uniform(0.12, 0.20))  # human-like spacing
+
+            vis, cap = submit_modal_visible_and_cap()
+            if cap:  # remember detected cap (often 10)
+                dynamic_cap = min(dynamic_cap, cap)
+            if vis:
+                break  # modal is up -> cap reached on site
 
             if counter_el:
                 try:
@@ -306,13 +342,14 @@ def worker(worker_id: int, loops_for_this_thread: int, use_edge: bool, win_size:
                             stagnant += 1
                         else:
                             stagnant, last_count = 0, n
-                        if stagnant >= 3:  # no movement after several clicks -> stop
+                        if stagnant >= 3:
                             break
                 except StaleElementReferenceException:
                     pass
 
-            # hard safety upper bound to avoid runaway if UI changes drastically
-            if real_votes >= 20:
+            if real_votes >= dynamic_cap:
+                break
+            if real_votes >= MAX_VOTES_PER_LOOP_SAFETY:
                 break
 
         # --- FAST SUBMIT DETECTION & CLICK ---
@@ -322,7 +359,6 @@ def worker(worker_id: int, loops_for_this_thread: int, use_edge: bool, win_size:
             X_HAS = MODAL_SCOPE + "//button[contains(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'submit')]"
 
             btn = None
-            # poll quickly (50ms) up to 6s in total
             for xp, to in [(X_EQ, 6), (X_HAS, 4),
                            ("//button[normalize-space(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'))='submit']", 2),
                            ("//button[contains(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'submit')]", 2)]:
@@ -334,7 +370,6 @@ def worker(worker_id: int, loops_for_this_thread: int, use_edge: bool, win_size:
             if not btn:
                 return False
 
-            # small backoff if still animating, then JS click
             try:
                 driver.execute_script("return arguments[0].offsetParent !== null", btn)
                 time.sleep(0.03)
@@ -350,9 +385,8 @@ def worker(worker_id: int, loops_for_this_thread: int, use_edge: bool, win_size:
         return real_votes
 
     def logout_and_wait():
-        # Short cool-off to avoid hammering
-        time.sleep(random.uniform(1.0, 1.8))
-        # Try logout button if present; otherwise just clear & reload
+        if stop_event.is_set(): return
+        time.sleep(random.uniform(1.0, 1.8))  # short cool-off
         try:
             b = driver.find_element(By.CSS_SELECTOR, "button.chakra-button.AuthNav__login-btn.css-ki1yvo")
             safe_click(driver, b)
@@ -366,28 +400,28 @@ def worker(worker_id: int, loops_for_this_thread: int, use_edge: bool, win_size:
                     driver.get(VOTE_URL)
                 except Exception:
                     pass
-        # Extra human-like pause before next account
-        time.sleep(random.uniform(2.5, 6.5))
+        time.sleep(random.uniform(2.5, 6.5))  # human-like pause
 
     # --------- Main per-thread loop ----------
     current_loop = 0
     try:
         while True:
+            if stop_event.is_set(): break
             if loops_for_this_thread != 0 and current_loop >= loops_for_this_thread:
                 break
             current_loop += 1
 
             ok, email = login()
-            if not ok:
-                print(f"[T{worker_id}] ⚠️ login failed"); break
+            if not ok or stop_event.is_set():
+                print(f"[T{worker_id}] ⚠️ login failed or stopped"); break
 
             added = vote_jimin_only_and_count()
             with _submit_lock:
                 global _global_submit_count
                 _global_submit_count += added
 
-            vno = next_vote_no()
-            print(f"[T{worker_id}] ✅ Submitted {added} vote(s) (#{vno}) | {email or 'N/A'}")
+            thread_total += added
+            print(f"[T{worker_id}] ✅ Submitted {added} vote(s) — thread total = {thread_total} | {email or 'N/A'}")
 
             logout_and_wait()
 
@@ -397,10 +431,31 @@ def worker(worker_id: int, loops_for_this_thread: int, use_edge: bool, win_size:
         except Exception:
             pass
 
+# ---------- CLI ----------
+def parse_args():
+    parser = argparse.ArgumentParser(description=f"VMA voter (Selenium, multi-thread, max threads = {MAX_THREADS})")
+    parser.add_argument("--threads", type=int, default=1, help=f"Number of parallel threads (max {MAX_THREADS})")
+    parser.add_argument("--loops", type=int, default=1, help="Loops per thread (0 = infinite) — overridden by interactive input")
+    parser.add_argument("--edge", action="store_true", help="Use Edge instead of Chrome")
+    parser.add_argument("--win", default="480,360", help="Window size WxH (default 480,360)")
+    parser.add_argument("--pos", default="0,0", help="Window position X,Y (default 0,0)")
+    return parser.parse_args()
+
+# ---------- Helper to pause before exit ----------
+def _pause_exit():
+    try:
+        input("\nPress Enter to close...")
+    except Exception:
+        pass
+
 # ---------- Main ----------
 if __name__ == "__main__":
     try:
         args = parse_args()
+
+        # start hotkey
+        start_hotkey_listener()
+        print("▶ Press ANY key to stop…")
 
         # Prompt threads
         try:
@@ -420,7 +475,6 @@ if __name__ == "__main__":
             hint = f"{args.loops}"
             val = input(f"Loops per thread (0 = infinite). Single number OR comma-list for each thread [{hint}]: ").strip()
             if not val:
-                # Use CLI default for all threads
                 loops_list = [max(0, args.loops)] * threads
             else:
                 loops_list = parse_loops_input(val, threads)
@@ -439,14 +493,7 @@ if __name__ == "__main__":
         print(f"🕒 Started : {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(start_clock))}")
         print(f"🕒 Finished: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(finish_clock))}")
         print(f"🧮 Total votes (all threads): {_global_submit_count}")
-
-        elapsed = finish_clock - start_clock
-        if elapsed >= 3600:
-           print(f"\U0001f3c1 All threads finished in {elapsed / 3600:.2f} hr")
-        elif elapsed >= 60:
-           print(f"\U0001f3c1 All threads finished in {elapsed / 60:.2f} min")
-        else:
-           print(f"\U0001f3c1 All threads finished in {elapsed:.1f} sec")
+        print(f"🏁 All threads finished in {(finish_clock - start_clock) / 3600:.2f} hr")
 
     except Exception:
         import traceback
