@@ -21,6 +21,13 @@ from selenium.common.exceptions import (
 from webdriver_manager.chrome import ChromeDriverManager
 from webdriver_manager.microsoft import EdgeChromiumDriverManager
 
+def _pause_exit():
+    try:
+        input("\nPress Enter to close...")
+    except Exception:
+        pass
+
+
 # ---------- Config ----------
 VOTE_URL = "https://www.mtv.com/vma/vote"
 CATEGORY_ID = "#accordion-button-best-k-pop"
@@ -300,34 +307,49 @@ def worker(worker_id: int, loops: int, use_edge: bool=False):
 
 # ---------- Main ----------
 if __name__ == "__main__":
-    args = parse_args()
-
     try:
-        val = input(f"Threads (max {MAX_THREADS}) [{args.threads}]: ").strip()
-        if val:
-            args.threads = min(MAX_THREADS, max(1, int(val)))
-    except Exception: pass
+        args = parse_args()
 
-    try:
-        val = input(f"Loops per thread (0 = infinite) [{args.loops}]: ").strip()
-        if val: args.loops = max(0, int(val))
-    except Exception: pass
-
-    threads  = min(MAX_THREADS, max(1, args.threads))
-    loops    = max(0, args.loops)
-    use_edge = bool(args.edge)
-
-    start_clock = time.time()
-    print(f"▶ Starting {threads} thread(s); loops per thread = {loops or '∞'}; browser={'Edge' if use_edge else 'Chrome'}")
-
-    with ThreadPoolExecutor(max_workers=threads) as ex:
-        futs = [ex.submit(worker, i+1, loops, use_edge) for i in range(threads)]
-        for _ in as_completed(futs):
+        # prompts
+        try:
+            val = input(f"Threads (max {MAX_THREADS}) [{args.threads}]: ").strip()
+            if val:
+                args.threads = min(MAX_THREADS, max(1, int(val)))
+        except Exception:
             pass
 
-    finish_clock = time.time()
-    print(f"🕒 Started : {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(start_clock))}")
-    print(f"🕒 Finished: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(finish_clock))}")
-    print(f"🧮 Total votes (all threads): {_global_submit_count}")
-    print(f"🏁 All threads finished in {finish_clock - start_clock:.1f}s")
-    sys.exit(0)
+        try:
+            val = input(f"Loops per thread (0 = infinite) [{args.loops}]: ").strip()
+            if val:
+                args.loops = max(0, int(val))
+        except Exception:
+            pass
+
+        threads  = min(MAX_THREADS, max(1, args.threads))
+        loops    = max(0, args.loops)
+        use_edge = bool(args.edge)
+
+        start_clock = time.time()
+        print(f"▶ Starting {threads} thread(s); loops per thread = {loops or '∞'}; browser={'Edge' if use_edge else 'Chrome'}")
+
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with ThreadPoolExecutor(max_workers=threads) as ex:
+            futs = [ex.submit(worker, i+1, loops, use_edge) for i in range(threads)]
+            for _ in as_completed(futs):
+                pass
+
+        finish_clock = time.time()
+        print(f"🕒 Started : {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(start_clock))}")
+        print(f"🕒 Finished: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(finish_clock))}")
+        print(f"🧮 Total votes (all threads): {_global_submit_count}")
+        print(f"🏁 All threads finished in {finish_clock - start_clock:.1f}s")
+
+    except Exception as e:
+        # show any fatal errors instead of instantly closing
+        import traceback
+        print("\n=== FATAL ERROR ===")
+        traceback.print_exc()
+
+    finally:
+        _pause_exit()
+        sys.exit(0)
