@@ -172,7 +172,7 @@ def worker(worker_id: int, loops_for_this_thread: int, use_edge: bool, win_size:
         "--disable-background-timer-throttling",
         "--disable-backgrounding-occluded-windows",
         "--disable-renderer-backgrounding",
-    ]:
+       ]:
         opts.add_argument(a)
 
     # Selenium 4 Service
@@ -191,6 +191,8 @@ def worker(worker_id: int, loops_for_this_thread: int, use_edge: bool, win_size:
         print(f"[T{worker_id}] ❌ Unable to start browser: {e}")
         return
 
+        opts.add_experimental_option("excludeSwitches", ["enable-logging"])
+ 
     thread_total = 0  # per-thread running total
 
     def login():
@@ -200,7 +202,7 @@ def worker(worker_id: int, loops_for_this_thread: int, use_edge: bool, win_size:
         except WebDriverException as e:
             print(f"[T{worker_id}] nav error: {e}")
             return False, None
-        print(f"[T{worker_id}] ▶ started")
+        # print(f"[T{worker_id}] ▶ started")
 
         rdelay(0.6, 1.0)
         if stop_event.is_set(): return False, None
@@ -400,7 +402,7 @@ def worker(worker_id: int, loops_for_this_thread: int, use_edge: bool, win_size:
                     driver.get(VOTE_URL)
                 except Exception:
                     pass
-        time.sleep(random.uniform(2.5, 6.5))  # human-like pause
+        time.sleep(random.uniform(2.5, 5.5))  # human-like pause
 
     # --------- Main per-thread loop ----------
     current_loop = 0
