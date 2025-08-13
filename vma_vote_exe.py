@@ -1,13 +1,12 @@
-# vma_vote_exe.py — Multi-threaded voter (Jimin-only), robust login + fast submit
-# - Visible browser (no headless)
-# - Prompts only for threads & loops; starts immediately, ends when done
-# - Smaller window (800x600)
-# - Real-name email generator; prints email every loop
-# - Fast 10-clicks + fast Submit
-# - Strong reset between loops (cookies + storage cleared; reload to vote page)
-# - Total-vote aggregation, max threads = 6
-# - Selenium 4 Service() usage
-# - Pause before exit so logs are visible
+# vma_vote_exe.py — Stable + fast timing (long-run safe)
+# - Visible browser, prompts only for threads & loops
+# - Real-name email generator; prints the email used every loop
+# - Fast Add-Vote clicks (60–90 ms pacing, 12 attempts to guarantee 10)
+# - Fast Submit detection (50 ms polling, tiny backoff before click)
+# - Shorter reset between loops (~1.0–1.8 s)
+# - Selenium 4 Service() API
+# - Max threads = 6
+# - Pause before exit
 
 import time, random, re, sys, argparse, threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -15,7 +14,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # ---------- Selenium & Drivers ----------
 from selenium import webdriver
 from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.chrome.options import Options as ChromeOptions
 from selenium.webdriver.edge.options import Options as EdgeOptions
 from selenium.webdriver.chrome.service import Service as ChromeService
@@ -57,12 +55,12 @@ def parse_args():
     return parser.parse_args()
 
 # ---------- Small utils ----------
-def rdelay(a=0.02, b=0.05): time.sleep(random.uniform(a, b))
+def rdelay(a=0.08, b=0.16): time.sleep(random.uniform(a, b))
 
 def safe_click(driver, el):
     try:
         driver.execute_script("arguments[0].scrollIntoView({behavior:'instant',block:'center'});", el)
-        rdelay(0.01, 0.03)
+        time.sleep(0.02)
         el.click()
         return True
     except (ElementClickInterceptedException, WebDriverException):
@@ -72,7 +70,15 @@ def safe_click(driver, el):
         except WebDriverException:
             return False
 
-def quick_wait(driver, condition, timeout=5.0, poll=0.05):
+def wait_css(driver, sel, timeout=8):
+    try:
+        return WebDriverWait(driver, timeout).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, sel))
+        )
+    except TimeoutException:
+        return None
+
+def quick_wait(driver, condition, timeout=6.0, poll=0.05):
     return WebDriverWait(driver, timeout, poll_frequency=poll).until(condition)
 
 def next_vote_no() -> int:
@@ -101,28 +107,12 @@ def gen_email():
 
 # ---------- Core flow (per thread) ----------
 def worker(worker_id: int, loops: int, use_edge: bool=False):
-    # Options: speed & lightness
     opts = EdgeOptions() if use_edge else ChromeOptions()
-    opts.add_argument("--window-size=800,600")
-    opts.add_argument("--disable-logging")
-    opts.add_argument("--log-level=3")
-    opts.add_argument("--no-default-browser-check")
-    opts.add_argument("--disable-background-networking")
-    opts.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
-    opts.add_experimental_option("useAutomationExtension", False)
-    # Disable images, notifications, etc. to speed things up
-    prefs = {
-        "profile.managed_default_content_settings.images": 2,
-        "credentials_enable_service": False,
-        "profile.password_manager_enabled": False,
-        "profile.default_content_setting_values.notifications": 2,
-        "profile.default_content_setting_values.geolocation": 2,
-    }
-    opts.add_experimental_option("prefs", prefs)
-    # Faster page loads (don't wait for all subresources)
-    opts.page_load_strategy = "eager"
+    opts.add_argument("--window-size=800,600")  # visible, smaller window
+    for a in ["--disable-logging","--log-level=3","--no-default-browser-check","--disable-background-networking"]:
+        opts.add_argument(a)
 
-    # Launch browser (Selenium 4 Service API)
+    # Selenium 4 Service
     try:
         if use_edge:
             service = EdgeService(EdgeChromiumDriverManager().install())
@@ -130,170 +120,81 @@ def worker(worker_id: int, loops: int, use_edge: bool=False):
         else:
             service = ChromeService(ChromeDriverManager().install())
             driver = webdriver.Chrome(service=service, options=opts)
-        driver.implicitly_wait(0)
-        driver.set_page_load_timeout(12)
-        driver.set_script_timeout(8)
     except Exception as e:
         print(f"[T{worker_id}] ❌ Unable to start browser: {e}")
         return
 
-    def between_loops_fast():
-        """Strong reset so each loop starts clean and shows email gate."""
-        try:
-            driver.execute_script("window.localStorage.clear(); window.sessionStorage.clear();")
-        except Exception:
-            pass
-        try:
-            driver.delete_all_cookies()
-        except Exception:
-            pass
+    def login():
         try:
             driver.get(VOTE_URL)
-        except Exception:
-            try:
-                driver.execute_script("location.href = arguments[0];", VOTE_URL)
-            except Exception:
-                pass
-        time.sleep(0.3)  # give SPA a moment to mount
-
-    def login():
-        """Handles full-page auth or modal. Returns (True, email) or (True, None) if already logged in."""
-        # Ensure we're on the vote page (or navigate there)
-        try:
-            if not driver.current_url.startswith(VOTE_URL):
-                try:
-                    driver.get(VOTE_URL)
-                except TimeoutException:
-                    pass
-        except Exception:
-            try:
-                driver.get(VOTE_URL)
-            except Exception as e:
-                print(f"[T{worker_id}] nav error: {e}")
-                return False, None
+        except WebDriverException as e:
+            print(f"[T{worker_id}] nav error: {e}")
+            return False, None
         print(f"[T{worker_id}] ▶ started")
 
-        # Poke "Add Vote" to trigger inline gate (if present)
+        rdelay(0.6, 1.0)
         try:
             btn = driver.find_element(By.CSS_SELECTOR, "button[aria-label='Add Vote']")
-            driver.execute_script("arguments[0].click();", btn)
+            safe_click(driver, btn)
+            rdelay(0.4, 0.7)
         except NoSuchElementException:
             pass
 
-        # Helper: find an email input (modal or full page)
-        def find_email_input():
-            Xs = [
-                "//input[@type='email']",
-                "//input[contains(@id,'field-') and contains(@id,':')]",  # Chakra random ids
-                "//input[@inputmode='email']",
-                "//input[contains(translate(@placeholder,'EMAIL','email'),'email') or contains(translate(@aria-label,'EMAIL','email'),'email') or contains(translate(@name,'EMAIL','email'),'email')]",
-            ]
-            for xp in Xs:
-                try:
-                    el = driver.find_element(By.XPATH, xp)
-                    if el.is_displayed():
-                        return el
-                except NoSuchElementException:
-                    continue
-            return None
-
-        # Helper: click a login/continue/submit-like button
-        def click_login_like():
-            Xs = [
-                "//button[normalize-space(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'))='log in']",
-                "//button[normalize-space(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'))='login']",
-                "//button[contains(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'continue')]",
-                "//button[contains(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'next')]",
-                "//button[contains(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'submit')]",
-            ]
-            for xp in Xs:
-                try:
-                    b = driver.find_element(By.XPATH, xp)
-                    if b.is_displayed():
-                        try:
-                            b.click(); return True
-                        except WebDriverException:
-                            try:
-                                driver.execute_script("arguments[0].click();", b); return True
-                            except WebDriverException:
-                                pass
-                except NoSuchElementException:
-                    continue
-            return False
-
-        # If category accordion is visible and no email input, assume we’re logged in already
+        # email field for modal/full-page login
         try:
-            if driver.find_elements(By.CSS_SELECTOR, CATEGORY_ID) and not find_email_input():
-                return True, None
-        except Exception:
-            pass
+            email_input = driver.find_element(By.XPATH, "//input[@type='email' or starts-with(@id,'field-:')]")
+        except NoSuchElementException:
+            return True, None
 
-        # Wait for email input to appear (up to ~8s)
-        email_input = None
-        for _ in range(80):
-            email_input = find_email_input()
-            if email_input:
-                break
-            time.sleep(0.1)
-
-        if not email_input:
-            # Might already be logged in if section is present
-            try:
-                if driver.find_elements(By.CSS_SELECTOR, CATEGORY_ID):
-                    return True, None
-            except Exception:
-                pass
-            print(f"[T{worker_id}] ⚠️ no email field found")
-            return False, None
-
-        # Type email + submit (ENTER + click fallback)
         addr = gen_email()
         try:
-            driver.execute_script("arguments[0].scrollIntoView({behavior:'instant',block:'center'});", email_input)
             email_input.clear()
             email_input.send_keys(addr)
-            email_input.send_keys(Keys.ENTER)
-        except WebDriverException as e:
-            print(f"[T{worker_id}] email typing error: {e}")
+        except WebDriverException:
             return False, None
 
-        # Also click a login-like button to be safe
-        click_login_like()
-
-        # Wait until the email field disappears or category appears (~6s)
-        ok = False
-        for _ in range(120):
-            if not find_email_input():
-                ok = True; break
+        # click "Log in" (handles both 'Log in' and 'Login' etc.)
+        logged = False
+        for _ in range(50):
             try:
-                if driver.find_elements(By.CSS_SELECTOR, CATEGORY_ID):
-                    ok = True; break
-            except Exception:
-                pass
-            time.sleep(0.05)
-
-        if not ok:
-            print(f"[T{worker_id}] ⚠️ login didn’t complete in time")
+                btn = driver.find_element(By.XPATH, "//button[normalize-space(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'))='log in']")
+            except NoSuchElementException:
+                try:
+                    btn = driver.find_element(By.XPATH, "//button[contains(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'log in')]")
+                except NoSuchElementException:
+                    btn = None
+            if btn and safe_click(driver, btn):
+                logged = True
+                break
+            time.sleep(0.08)
+        if not logged:
+            print(f"[T{worker_id}] ⚠️ could not click Log in")
             return False, None
 
-        print(f"[T{worker_id}] ...login with {addr}")
+        # wait until the email form is gone
+        try:
+            WebDriverWait(driver, 8).until_not(
+                EC.presence_of_element_located((By.XPATH, "//input[@type='email' or starts-with(@id,'field-:')]"))
+            )
+        except TimeoutException:
+            print(f"[T{worker_id}] ⚠️ email form stuck")
+            return False, None
         return True, addr
 
     def open_section():
-        try:
-            btn = quick_wait(driver, EC.presence_of_element_located((By.CSS_SELECTOR, CATEGORY_ID)), timeout=6, poll=0.06)
-        except TimeoutException:
-            return False
+        btn = wait_css(driver, CATEGORY_ID, 6)
+        if not btn: return False
         driver.execute_script("arguments[0].scrollIntoView({behavior:'instant',block:'center'});", btn)
+        rdelay(0.3, 0.5)
         if (btn.get_attribute("aria-expanded") or "").lower() != "true":
             safe_click(driver, btn)
+            rdelay(0.5, 0.8)
         return True
 
     def vote_jimin_only():
-        t = time.time()
         if not open_section(): return False
         try:
-            quick_wait(driver, EC.presence_of_element_located((By.XPATH, ARTIST_X_H3)), timeout=6, poll=0.06)
+            WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.XPATH, ARTIST_X_H3)))
         except TimeoutException:
             return False
         try:
@@ -301,28 +202,34 @@ def worker(worker_id: int, loops: int, use_edge: bool=False):
         except NoSuchElementException:
             return False
 
-        # Fast 10 clicks (a couple extra; site caps at 10)
-        for _ in range(12):
+        # --- FAST, LONG-RUN-STABLE ADD-VOTE CLICKS ---
+        for _ in range(12):  # a couple extra; site caps at 10
             try:
                 driver.execute_script("arguments[0].click();", add_btn)
             except WebDriverException:
                 pass
-            time.sleep(0.05)
+            time.sleep(random.uniform(0.06, 0.09))  # 60–90 ms spacing
 
-        # Find and click Submit quickly
-        SUBMIT_EQ  = "//*[@role='dialog' or contains(@id,'chakra-modal')]//button[normalize-space(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'))='submit']"
-        SUBMIT_HAS = "//*[@role='dialog' or contains(@id,'chakra-modal')]//button[contains(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'submit')]"
-        btn = None
-        for xp, to in [(SUBMIT_EQ, 5), (SUBMIT_HAS, 3),
-                       ("//button[normalize-space(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'))='submit']", 2),
-                       ("//button[contains(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'submit')]", 2)]:
-            try:
-                btn = quick_wait(driver, EC.element_to_be_clickable((By.XPATH, xp)), timeout=to, poll=0.05)
-                break
-            except TimeoutException:
-                btn = None
-        if btn:
-            # tiny backoff if animating
+        # --- FAST SUBMIT DETECTION & CLICK ---
+        def click_submit_modal():
+            MODAL_SCOPE = "//*[@role='dialog' or contains(@id,'chakra-modal')]"
+            X_EQ  = MODAL_SCOPE + "//button[normalize-space(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'))='submit']"
+            X_HAS = MODAL_SCOPE + "//button[contains(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'submit')]"
+
+            btn = None
+            # poll quickly (50ms) up to 6s in total
+            for xp, to in [(X_EQ, 6), (X_HAS, 4),
+                           ("//button[normalize-space(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'))='submit']", 2),
+                           ("//button[contains(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'submit')]", 2)]:
+                try:
+                    btn = quick_wait(driver, EC.element_to_be_clickable((By.XPATH, xp)), timeout=to, poll=0.05)
+                    break
+                except TimeoutException:
+                    btn = None
+            if not btn:
+                return False
+
+            # small backoff if still animating, then JS click
             try:
                 driver.execute_script("return arguments[0].offsetParent !== null", btn)
                 time.sleep(0.03)
@@ -330,11 +237,30 @@ def worker(worker_id: int, loops: int, use_edge: bool=False):
                 pass
             try:
                 driver.execute_script("arguments[0].click();", btn)
+                return True
             except WebDriverException:
-                safe_click(driver, btn)
+                return safe_click(driver, btn)
 
-        print(f"[T{worker_id}] ...vote+submit in {time.time()-t:.2f}s")
+        click_submit_modal()
         return True
+
+    def logout_and_wait():
+        # Short cool-off to avoid hammering
+        time.sleep(random.uniform(1.0, 1.8))
+        # Try logout button if present; otherwise just clear & reload
+        try:
+            b = driver.find_element(By.CSS_SELECTOR, "button.chakra-button.AuthNav__login-btn.css-ki1yvo")
+            safe_click(driver, b)
+        except NoSuchElementException:
+            try:
+                b = driver.find_element(By.XPATH, "//button[contains(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'log out')]")
+                safe_click(driver, b)
+            except NoSuchElementException:
+                try:
+                    driver.execute_script("window.localStorage.clear(); window.sessionStorage.clear();")
+                    driver.get(VOTE_URL)
+                except Exception:
+                    pass
 
     # --------- Main per-thread loop ----------
     current_loop = 0
@@ -346,14 +272,9 @@ def worker(worker_id: int, loops: int, use_edge: bool=False):
 
             ok, email = login()
             if not ok:
-                print(f"[T{worker_id}] ⚠️ login failed")
-                between_loops_fast()
-                continue
-
+                print(f"[T{worker_id}] ⚠️ login failed"); break
             if not vote_jimin_only():
-                print(f"[T{worker_id}] ⚠️ vote failed")
-                between_loops_fast()
-                continue
+                print(f"[T{worker_id}] ⚠️ vote failed"); break
 
             with _submit_lock:
                 global _global_submit_count
@@ -362,8 +283,7 @@ def worker(worker_id: int, loops: int, use_edge: bool=False):
             vno = next_vote_no()
             print(f"[T{worker_id}] ✅ Submitted 10 votes (#{vno}) | {email or 'N/A'}")
 
-            # Prepare for the next loop quickly
-            between_loops_fast()
+            logout_and_wait()
 
     finally:
         try:
@@ -376,7 +296,7 @@ if __name__ == "__main__":
     try:
         args = parse_args()
 
-        # prompt only threads & loops
+        # prompts
         try:
             val = input(f"Threads (max {MAX_THREADS}) [{args.threads}]: ").strip()
             if val:
