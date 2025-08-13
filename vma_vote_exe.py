@@ -36,8 +36,6 @@ MAX_THREADS = 6  # hard cap
 # ---------- Globals ----------
 _global_submit_count = 0
 _submit_lock = threading.Lock()
-_counter_lock = threading.Lock()
-_global_vote_no = 0
 
 # ---------- Helper to pause before exit ----------
 def _pause_exit():
@@ -84,11 +82,56 @@ def wait_css(driver, sel, timeout=8):
 def quick_wait(driver, condition, timeout=6.0, poll=0.05):
     return WebDriverWait(driver, timeout, poll_frequency=poll).until(condition)
 
-def next_vote_no() -> int:
-    global _global_vote_no
-    with _counter_lock:
-        _global_vote_no += 1
-        return _global_vote_no
+def get_awarded_votes_from_ui(driver, timeout=6.0):
+    """
+    Try to read how many votes were actually awarded from any confirmation
+    modal/toast/text. Returns an int or None if not detected.
+    """
+    deadline = time.time() + timeout
+    texts_seen = set()
+
+    xp_scopes = [
+        "//*[@role='dialog' or contains(@id,'chakra-modal')]",
+        "//*[contains(@class,'toast') or contains(@class,'chakra-alert')]",
+        "//*[contains(@class,'chakra')]",
+        "//*"
+    ]
+
+    while time.time() < deadline:
+        for scope in xp_scopes:
+            try:
+                els = driver.find_elements(
+                    By.XPATH,
+                    f"{scope}[.//text()[contains(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'vote') or "
+                    f"contains(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'submitted') or "
+                    f"contains(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'thanks')]]"
+                )
+            except Exception:
+                els = []
+            for el in els:
+                try:
+                    t = el.text.strip()
+                    if t:
+                        texts_seen.add(t)
+                except Exception:
+                    pass
+
+        if texts_seen:
+            break
+        time.sleep(0.05)
+
+    # pull out numbers we saw and pick a reasonable max
+    nums = []
+    for t in texts_seen:
+        for m in re.findall(r"\d+", t):
+            try:
+                nums.append(int(m))
+            except Exception:
+                pass
+
+    # keep it sane: e.g., 1..100
+    cand = [n for n in nums if 1 <= n <= 100]
+    return max(cand) if cand else None
 
 # ---------- Real-name email generator ----------
 FIRST = ["john","michael","sarah","emily","david","chris","anna","lisa","mark","paul","james","laura",
@@ -106,7 +149,7 @@ def gen_email():
     fn = random.choice(FIRST)
     ln = random.choice(LAST)
     num = random.randint(1000, 99999)
-    return f"{fn}.{ln}.{num}@{random.choice(DOMAINS)}".lower()
+    return f"{fn}{ln}{num}@{random.choice(DOMAINS)}".lower()
 
 # ---------- Core flow (per thread) ----------
 def worker(worker_id: int, loops: int, use_edge: bool, win_size: str, win_pos: str):
@@ -208,6 +251,47 @@ def worker(worker_id: int, loops: int, use_edge: bool, win_size: str, win_pos: s
             return False, None
         return True, addr
 
+    def detect_vote_limit(driver):
+    """
+    Best-effort read of the page's per-submit vote cap (10, 20, etc.).
+    Returns an int; falls back to 10 if not found.
+    """
+    # 1) Look for a progress/counter like "0/10", "3 / 20", etc.
+    try:
+        # Search in common areas first
+        scopes = [
+            "//*[@role='dialog' or contains(@id,'chakra-modal')]",
+            "//*[contains(@class,'chakra')]",
+            "//*",
+        ]
+        for scope in scopes:
+            els = driver.find_elements(By.XPATH, f"{scope}[.//text()[contains(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'vote') or contains(text(),'/')]]")
+            for el in els:
+                t = (el.text or "").strip()
+                m = re.search(r'(\d+)\s*/\s*(\d+)', t)
+                if m:
+                    cap = int(m.group(2))
+                    if 1 <= cap <= 100:
+                        return cap
+    except Exception:
+        pass
+
+    # 2) Sometimes a progressbar carries the max as aria-valuemax
+    try:
+        pbars = driver.find_elements(By.CSS_SELECTOR, '[role="progressbar"]')
+        for pb in pbars:
+            valmax = pb.get_attribute("aria-valuemax")
+            if valmax and valmax.isdigit():
+                cap = int(valmax)
+                if 1 <= cap <= 100:
+                    return cap
+    except Exception:
+        pass
+
+    # Fallback
+    return 10
+
+
     def open_section():
         btn = wait_css(driver, CATEGORY_ID, 6)
         if not btn: return False
@@ -219,57 +303,68 @@ def worker(worker_id: int, loops: int, use_edge: bool, win_size: str, win_pos: s
         return True
 
     def vote_jimin_only():
-        if not open_section(): return False
+    if not open_section():
+        return False
+
+    try:
+        WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.XPATH, ARTIST_X_H3)))
+    except TimeoutException:
+        return False
+
+    try:
+        add_btn = driver.find_element(By.XPATH, f"({ARTIST_X_H3}/following::button[@aria-label='Add Vote'])[1]")
+    except NoSuchElementException:
+        return False
+
+    # --- HUMAN-LIKE ADD-VOTE CLICKS (adaptive to site limit) ---
+    max_votes = detect_vote_limit(driver)  # e.g., 10 or 20
+    safety_extra = 2                       # click a couple extra to ensure all register
+    for _ in range(max_votes + safety_extra):
         try:
-            WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.XPATH, ARTIST_X_H3)))
-        except TimeoutException:
+            driver.execute_script("arguments[0].click();", add_btn)
+        except WebDriverException:
+            pass
+        time.sleep(random.uniform(0.12, 0.20))  # 120–200 ms spacing
+
+    # --- FAST SUBMIT DETECTION & CLICK ---
+    def click_submit_modal():
+        MODAL_SCOPE = "//*[@role='dialog' or contains(@id,'chakra-modal')]"
+        X_EQ  = MODAL_SCOPE + "//button[normalize-space(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'))='submit']"
+        X_HAS = MODAL_SCOPE + "//button[contains(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'submit')]"
+
+        btn = None
+        for xp, to in [
+            (X_EQ, 6), (X_HAS, 4),
+            ("//button[normalize-space(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'))='submit']", 2),
+            ("//button[contains(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'submit')]", 2)
+        ]:
+            try:
+                btn = quick_wait(driver, EC.element_to_be_clickable((By.XPATH, xp)), timeout=to, poll=0.05)
+                break
+            except TimeoutException:
+                btn = None
+        if not btn:
             return False
+
         try:
-            add_btn = driver.find_element(By.XPATH, f"({ARTIST_X_H3}/following::button[@aria-label='Add Vote'])[1]")
-        except NoSuchElementException:
-            return False
+            driver.execute_script("return arguments[0].offsetParent !== null", btn)
+            time.sleep(0.03)
+        except Exception:
+            pass
+        try:
+            driver.execute_script("arguments[0].click();", btn)
+            return True
+        except WebDriverException:
+            return safe_click(driver, btn)
 
-        # --- HUMAN-LIKE ADD-VOTE CLICKS ---
-        for _ in range(12):  # a couple extra; site caps at 10
-            try:
-                driver.execute_script("arguments[0].click();", add_btn)
-            except WebDriverException:
-                pass
-            time.sleep(random.uniform(0.12, 0.20))  # 120–200 ms spacing
+    ok = click_submit_modal()
 
-        # --- FAST SUBMIT DETECTION & CLICK ---
-        def click_submit_modal():
-            MODAL_SCOPE = "//*[@role='dialog' or contains(@id,'chakra-modal')]"
-            X_EQ  = MODAL_SCOPE + "//button[normalize-space(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'))='submit']"
-            X_HAS = MODAL_SCOPE + "//button[contains(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'submit')]"
+    # Read how many votes were actually awarded from UI (flexible)
+    awarded = get_awarded_votes_from_ui(driver, timeout=6.0)
+    if awarded is None:
+        awarded = 10
 
-            btn = None
-            # poll quickly (50ms) up to 6s in total
-            for xp, to in [(X_EQ, 6), (X_HAS, 4),
-                           ("//button[normalize-space(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'))='submit']", 2),
-                           ("//button[contains(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'submit')]", 2)]:
-                try:
-                    btn = quick_wait(driver, EC.element_to_be_clickable((By.XPATH, xp)), timeout=to, poll=0.05)
-                    break
-                except TimeoutException:
-                    btn = None
-            if not btn:
-                return False
-
-            # small backoff if still animating, then JS click
-            try:
-                driver.execute_script("return arguments[0].offsetParent !== null", btn)
-                time.sleep(0.03)
-            except Exception:
-                pass
-            try:
-                driver.execute_script("arguments[0].click();", btn)
-                return True
-            except WebDriverException:
-                return safe_click(driver, btn)
-
-        click_submit_modal()
-        return True
+    return awarded if ok else 0
 
     def logout_and_wait():
         # Short cool-off to avoid hammering
@@ -289,7 +384,7 @@ def worker(worker_id: int, loops: int, use_edge: bool, win_size: str, win_pos: s
                 except Exception:
                     pass
         # Extra human-like pause before next account
-        time.sleep(random.uniform(2.5, 6.5))
+        time.sleep(random.uniform(2.5, 5.5))
 
     # --------- Main per-thread loop ----------
     current_loop = 0
@@ -301,18 +396,24 @@ def worker(worker_id: int, loops: int, use_edge: bool, win_size: str, win_pos: s
 
             ok, email = login()
             if not ok:
-                print(f"[T{worker_id}] ⚠️ login failed"); break
-            if not vote_jimin_only():
-                print(f"[T{worker_id}] ⚠️ vote failed"); break
+                print(f"[T{worker_id}] ⚠️ login failed")
+                break
+
+            awarded = vote_jimin_only()
+            if not awarded:
+                print(f"[T{worker_id}] ⚠️ vote failed")
+                break
 
             with _submit_lock:
                 global _global_submit_count
-                _global_submit_count += 10
+                _global_submit_count += awarded
 
-            vno = next_vote_no()
-            print(f"[T{worker_id}] ✅ Submitted 10 votes (#{vno}) | {email or 'N/A'}")
+            # Per-thread numbering
+            print(f"[T{worker_id}] ✅ Submitted {awarded} votes (#{current_loop}) | {email or 'N/A'}")
 
             logout_and_wait()
+
+
 
     finally:
         try:
