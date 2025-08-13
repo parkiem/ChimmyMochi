@@ -1,13 +1,12 @@
-# vma_vote_exe.py — Stable flow + human-like delays
-# - Visible browser (no headless)
-# - Prompts only for threads & loops; starts immediately
-# - Real-name email generator; prints the email used every loop
-# - Add-Vote clicks slowed to 120–200 ms spacing (12 clicks to ensure 10 register)
-# - Fast Submit detection (50 ms polling + tiny backoff)
-# - Logout/reset: short 1.0–1.8 s + extra human pause 2.5–6.5 s between accounts
-# - Selenium 4 Service() API
-# - Max threads = 6
-# - Pause before exit so logs are visible
+# vma_vote_exe.py — Stable flow + human-like delays + anti-throttle (tiny visible window)
+# - Visible browser (no headless). Small 480x360 window; moved to (0,0). Do NOT minimize.
+# - Anti-throttling flags so it keeps running even if the window is covered/behind others.
+# - Prompts only for threads & loops; starts immediately.
+# - Real-name email generator; prints the email used every loop.
+# - Add-Vote clicks slowed to 120–200 ms spacing (12 clicks to ensure 10 register).
+# - Fast Submit detection (50 ms polling + tiny backoff).
+# - Logout/reset: short 1.0–1.8 s + extra human pause 2.5–6.5 s between accounts.
+# - Selenium 4 Service() API. Max threads = 6. Pause before exit.
 
 import time, random, re, sys, argparse, threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -53,6 +52,9 @@ def parse_args():
     parser.add_argument("--threads", type=int, default=1, help=f"Number of parallel threads (max {MAX_THREADS})")
     parser.add_argument("--loops", type=int, default=1, help="Loops per thread (0 = infinite)")
     parser.add_argument("--edge", action="store_true", help="Use Edge instead of Chrome")
+    # Optional: override window size/position without editing code
+    parser.add_argument("--win", default="480,360", help="Window size WxH (default 480,360)")
+    parser.add_argument("--pos", default="0,0", help="Window position X,Y (default 0,0)")
     return parser.parse_args()
 
 # ---------- Small utils ----------
@@ -107,10 +109,29 @@ def gen_email():
     return f"{fn}.{ln}.{num}@{random.choice(DOMAINS)}".lower()
 
 # ---------- Core flow (per thread) ----------
-def worker(worker_id: int, loops: int, use_edge: bool=False):
+def worker(worker_id: int, loops: int, use_edge: bool, win_size: str, win_pos: str):
+    # Parse size/pos args
+    try:
+        w, h = [int(x) for x in win_size.split(",")]
+    except Exception:
+        w, h = 480, 360
+    try:
+        x, y = [int(x) for x in win_pos.split(",")]
+    except Exception:
+        x, y = 0, 0
+
+    # Options: visible small window, anti-throttle flags
     opts = EdgeOptions() if use_edge else ChromeOptions()
-    opts.add_argument("--window-size=800,600")  # visible, smaller window
-    for a in ["--disable-logging","--log-level=3","--no-default-browser-check","--disable-background-networking"]:
+    opts.add_argument(f"--window-size={w},{h}")
+    for a in [
+        "--disable-logging",
+        "--log-level=3",
+        "--no-default-browser-check",
+        "--disable-background-networking",
+        "--disable-background-timer-throttling",
+        "--disable-backgrounding-occluded-windows",
+        "--disable-renderer-backgrounding",
+    ]:
         opts.add_argument(a)
 
     # Selenium 4 Service
@@ -121,6 +142,11 @@ def worker(worker_id: int, loops: int, use_edge: bool=False):
         else:
             service = ChromeService(ChromeDriverManager().install())
             driver = webdriver.Chrome(service=service, options=opts)
+        # keep it visible but tucked in a corner; do NOT minimize
+        try:
+            driver.set_window_position(x, y)
+        except Exception:
+            pass
     except Exception as e:
         print(f"[T{worker_id}] ❌ Unable to start browser: {e}")
         return
@@ -186,10 +212,10 @@ def worker(worker_id: int, loops: int, use_edge: bool=False):
         btn = wait_css(driver, CATEGORY_ID, 6)
         if not btn: return False
         driver.execute_script("arguments[0].scrollIntoView({behavior:'instant',block:'center'});", btn)
-        rdelay(0.3, 0.5)
+        time.sleep(random.uniform(0.30, 0.50))
         if (btn.get_attribute("aria-expanded") or "").lower() != "true":
             safe_click(driver, btn)
-            rdelay(0.5, 0.8)
+            time.sleep(random.uniform(0.50, 0.80))
         return True
 
     def vote_jimin_only():
@@ -203,7 +229,7 @@ def worker(worker_id: int, loops: int, use_edge: bool=False):
         except NoSuchElementException:
             return False
 
-        # --- SLOWER, HUMAN-LIKE ADD-VOTE CLICKS ---
+        # --- HUMAN-LIKE ADD-VOTE CLICKS ---
         for _ in range(12):  # a couple extra; site caps at 10
             try:
                 driver.execute_script("arguments[0].click();", add_btn)
@@ -262,7 +288,7 @@ def worker(worker_id: int, loops: int, use_edge: bool=False):
                     driver.get(VOTE_URL)
                 except Exception:
                     pass
-        # --- NEW: human-like pause before next account ---
+        # Extra human-like pause before next account
         time.sleep(random.uniform(2.5, 6.5))
 
     # --------- Main per-thread loop ----------
@@ -317,11 +343,15 @@ if __name__ == "__main__":
         loops    = max(0, args.loops)
         use_edge = bool(args.edge)
 
+        # optional: pass window size/pos from CLI
+        win_size = args.win
+        win_pos  = args.pos
+
         start_clock = time.time()
-        print(f"▶ Starting {threads} thread(s); loops per thread = {loops or '∞'}; browser={'Edge' if use_edge else 'Chrome'}")
+        print(f"▶ Starting {threads} thread(s); loops per thread = {loops or '∞'}; browser={'Edge' if use_edge else 'Chrome'}; win={win_size}; pos={win_pos}")
 
         with ThreadPoolExecutor(max_workers=threads) as ex:
-            futs = [ex.submit(worker, i+1, loops, use_edge) for i in range(threads)]
+            futs = [ex.submit(worker, i+1, loops, use_edge, win_size, win_pos) for i in range(threads)]
             for _ in as_completed(futs):
                 pass
 
