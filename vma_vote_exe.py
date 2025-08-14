@@ -424,8 +424,10 @@ def worker(worker_id: int, loops_for_this_thread: int, use_edge: bool, win_size:
                 global _global_submit_count
                 _global_submit_count += added
 
-            thread_total += added
-            print(f"[T{worker_id}] ✅ Submitted {added} vote(s) — thread total = {thread_total} | {email or 'N/A'}")
+            # Show loop progress instead of votes total
+            loops_label = f"{current_loop}/{'∞' if loops_for_this_thread == 0 else loops_for_this_thread}"
+            print(f"[T{worker_id}] ✅ Submitted {added} vote(s) — loop {loops_label} | {email or 'N/A'}")
+
 
             logout_and_wait()
 
