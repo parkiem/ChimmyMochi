@@ -141,7 +141,7 @@ def worker(worker_id: int, loops: int, use_edge: bool, win_size: str, win_pos: s
 
     # Selenium 4 Service
     try:
-         if use_edge:
+        if use_edge:
             service = EdgeService(EdgeChromiumDriverManager().install(), log_path='NUL')
             driver = webdriver.Edge(service=service, options=opts)
         else:
