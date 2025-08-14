@@ -355,7 +355,7 @@ def worker(worker_id: int, loops_for_this_thread: int, use_edge: bool, win_size:
 
             # Confirm only when HEADER decreases
             confirmed = False
-            for _ in range(10):  # ~300–600 ms to see decrement
+            for _ in range(10):  # ~120–200 ms to see decrement
                 time.sleep(0.05)
                 r_now, hc2 = read_remaining_and_cap()
                 if hc2: dynamic_cap = min(dynamic_cap, hc2)
@@ -434,7 +434,7 @@ def worker(worker_id: int, loops_for_this_thread: int, use_edge: bool, win_size:
                 _global_submit_count += added
 
             loops_label = f"{current_loop}/{'∞' if loops_for_this_thread == 0 else loops_for_this_thread}"
-            print(f"[T{worker_id}] ✅ Submitted {added} vote(s) — loop {loops_label} | {email or 'N/A'}")
+            print(f"[T{worker_id}] ✅ Votes submitted — loop {loops_label} | {email or 'N/A'}")
 
             logout_and_wait()
 
