@@ -32,7 +32,7 @@ HUB_URL   = "https://www.mtv.com/vma/vote"                           # then navi
 CATEGORY_ID = "#accordion-button-best-k-pop"
 ARTIST_X_H3 = "//h3[translate(normalize-space(.),'JIMIN','jimin')='jimin']"  # exact 'Jimin'
 
-MAX_THREADS = 100
+MAX_THREADS = 50
 SAFETY_CEILING = 20  # absolute safety ceiling in case UI misbehaves
 
 # ---------- Globals ----------
@@ -40,21 +40,27 @@ _global_submit_count = 0
 _submit_lock = threading.Lock()
 stop_event = threading.Event()
 
-# ---------- Small utils ----------
-def rdelay(a=0.05, b=0.10):  # slightly faster default delays
+# ---------- Small utils (faster) ----------
+# global pacing knobs
+CLICK_MIN, CLICK_MAX = 0.030, 0.060   # 30–60 ms between clicks
+CONFIRM_POLL_MS      = 30             # poll card counter every 30 ms
+CONFIRM_POLL_STEPS   = 12             # up to ~360 ms for a visible increment
+DISABLED_PATIENCE    = 40             # ~1.2–2.4 s max patience for debounce
+
+def rdelay(a=0.02, b=0.05):
     time.sleep(random.uniform(a, b))
 
 def safe_click(driver, el):
     try:
         driver.execute_script("arguments[0].scrollIntoView({behavior:'instant',block:'center'});", el)
-        time.sleep(0.01)
+        time.sleep(0.005)
         el.click()
         return True
-    except (ElementClickInterceptedException, WebDriverException):
+    except Exception:
         try:
             driver.execute_script("arguments[0].click();", el)
             return True
-        except WebDriverException:
+        except Exception:
             return False
 
 def wait_css(driver, sel, timeout=8):
@@ -434,7 +440,7 @@ def worker(worker_id: int, loops_for_this_thread: int, use_edge: bool, win_size:
                 _global_submit_count += added
 
             loops_label = f"{current_loop}/{'∞' if loops_for_this_thread == 0 else loops_for_this_thread}"
-            print(f"[T{worker_id}] ✅ Votes submitted — loop {loops_label} | {email or 'N/A'}")
+            print(f"[T{worker_id}] ✅ Votes submitted — loops # {loops_label} | {email or 'N/A'}")
 
             logout_and_wait()
 
@@ -491,7 +497,6 @@ if __name__ == "__main__":
         finish_clock = time.time()
         print(f"🕒 Started : {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(start_clock))}")
         print(f"🕒 Finished: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(finish_clock))}")
-        print(f"🧮 Total votes (all threads): {_global_submit_count}")
         print(f"🏁 All threads finished in {fmt_elapsed(finish_clock - start_clock)}")
 
     except Exception:
