@@ -88,15 +88,15 @@ FIRST = ["john","michael","sarah","emily","david","chris","anna","lisa","mark","
          "ryan","brandon","rachel","jason","patrick","victoria","kimberly","melissa","ashley","brittany","helen",
          "timothy","catherine","dennis","jacob","ethan","zoe","nathan","grace","henry","noah","ava","mia",
          "isabella","sophia"]
-LAST = ["smith","johnson","williams","brown","jones","miller","davis","garcia","rodriguez","martinez",
-        "hernandez","lopez","gonzalez","wilson","anderson","thomas","taylor","moore","jackson","martin",
-        "lee","thompson","white","harris","sanchez","clark","ramirez","lewis","robinson","walker"]
+LAST = ["smith","john","wilams","brown","jones","miller","davis","garcia","rodri","martinez",
+        "nandez","lopez","gonez","wilson","and","thomas","taylor","moore","jackson","martin",
+        "lee","thompson","white","harris","sanchez","lark","ram","lewis","roson","walker"]
 DOMAINS = ["gmail.com","outlook.com","yahoo.com","icloud.com","aol.com"]
 
 def gen_email():
     fn = random.choice(FIRST)
     ln = random.choice(LAST)
-    num = random.randint(1000, 9999)
+    num = random.randint(100, 999)
     return f"{fn}{ln}{num}@{random.choice(DOMAINS)}".lower()
 
 # ---------- Core flow (per thread) ----------
