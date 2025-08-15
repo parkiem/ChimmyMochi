@@ -346,7 +346,7 @@ def worker(worker_id: int, loops: int, use_edge: bool, win_size: str, win_pos: s
 
             # per-thread loop progress x/y (or x/∞)
             loops_label = f"{current_loop}/{'∞' if loops == 0 else loops}"
-            print(f"[T{worker_id}] ✅ Votes Submitted — loop {loops_label} | {email or 'N/A'}")
+            print(f"[T{worker_id}] ✅ Votes Submitted — loops # {loops_label} | {email or 'N/A'}")
 
             logout_and_wait()
 
