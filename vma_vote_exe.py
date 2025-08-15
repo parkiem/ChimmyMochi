@@ -106,11 +106,11 @@ FIRST = ["john","michael","sarah","emily","david","chris","anna","lisa","mark","
          "timothy","catherine","dennis","jacob","ethan","zoe","nathan","grace","henry","noah","ava","mia",
          "isabella","sophia"]
 LAST = ["smith","johnson","will","brown","jones","miller","davis","garcia","rod","martinez",
-        "hernandez","lopez","gon","wil","son","thomas","taylor","moore","jackson","martin",
+        "hernandez","lopez","gon","wil","son","thomas","taylor","money","jackson","martin",
         "lee","thomp","white","harris","sanchez","clark","ramirez","lewis","robin","walker"]
 DOMAINS = ["gmail.com","outlook.com","yahoo.com","icloud.com","aol.com"]
 def gen_email():
-    fn = random.choice(FIRST); ln = random.choice(LAST); num = random.randint(1000, 99999)
+    fn = random.choice(FIRST); ln = random.choice(LAST); num = random.randint(100, 9999)
     return f"{fn}{ln}{num}@{random.choice(DOMAINS)}".lower()
 
 # ---------- Worker ----------
