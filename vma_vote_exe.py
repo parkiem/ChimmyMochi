@@ -36,6 +36,10 @@ _submit_lock = threading.Lock()
 _counter_lock = threading.Lock()
 _global_vote_no = 0
 
+# NEW: track unique successful login emails
+_successful_logins = set()
+_login_lock = threading.Lock()
+
 # paths to temp log(s) so we can delete on exit
 _temp_driver_log = None
 _temp_chrome_log = None
@@ -101,16 +105,16 @@ def fmt_elapsed(s: float) -> str:
 # ---------- Real-name email generator (unchanged) ----------
 FIRST = ["john","michael","sarah","emily","david","chris","anna","lisa","mark","paul","james","laura",
          "peter","susan","robert","nancy","kevin","mary","brian","julia","alex","joshua","olivia","matthew",
-         "daniel","jennifer","thomas","andrew","step","karen","tyler","nicole","heather","eric","amanda",
+         "daniel","jennifer","thomas","andrew","stephanie","karen","tyler","nicole","heather","eric","amanda",
          "ryan","brandon","rachel","jason","patrick","victoria","kimberly","melissa","ashley","brittany","helen",
          "timothy","catherine","dennis","jacob","ethan","zoe","nathan","grace","henry","noah","ava","mia",
          "isabella","sophia"]
-LAST = ["smith","johnson","will","brown","jones","miller","davis","garcia","rod","martinez",
-        "hernandez","lopez","gon","wil","son","thomas","taylor","money","jackson","martin",
-        "lee","thomp","white","harris","sanchez","clark","ramirez","lewis","robin","walker"]
+LAST = ["smith","johnson","wil","brown","jones","moi","davis","garcia","rod","martinez",
+        "huem","lop","gon","wilson","son","thomas","kim","moore","park","martin",
+        "lee","thompson","white","har","sanchez","clark","ramirez","lewis","robin","walker"]
 DOMAINS = ["gmail.com","outlook.com","yahoo.com","icloud.com","aol.com"]
 def gen_email():
-    fn = random.choice(FIRST); ln = random.choice(LAST); num = random.randint(100, 9999)
+    fn = random.choice(FIRST); ln = random.choice(LAST); num = random.randint(1000, 99999)
     return f"{fn}{ln}{num}@{random.choice(DOMAINS)}".lower()
 
 # ---------- Worker ----------
@@ -313,7 +317,7 @@ def worker(worker_id: int, loops: int, use_edge: bool, win_size: str, win_pos: s
                     driver.get(VOTE_URL)
                 except Exception:
                     pass
-        time.sleep(random.uniform(2.0, 4.5))
+        time.sleep(random.uniform(2.0, 3.5))
 
     # --------- Main per-thread loop ----------
     current_loop = 0
@@ -326,16 +330,23 @@ def worker(worker_id: int, loops: int, use_edge: bool, win_size: str, win_pos: s
             ok, email = login()
             if not ok:
                 print(f"[T{worker_id}] ⚠️ login failed"); break
+
+            # NEW: record successful login email (only if an email was used)
+            if email:
+                with _login_lock:
+                    _successful_logins.add(email)
+
             if not vote_jimin_only():
                 print(f"[T{worker_id}] ⚠️ vote failed"); break
 
+            # (keep your existing vote counter in case you still want it)
             with _submit_lock:
                 global _global_submit_count
                 _global_submit_count += 20  # keep your existing accounting
 
             # per-thread loop progress x/y (or x/∞)
             loops_label = f"{current_loop}/{'∞' if loops == 0 else loops}"
-            print(f"[T{worker_id}] ✅ Votes Submitted — loops # {loops_label} | {email or 'N/A'}")
+            print(f"[T{worker_id}] ✅ Votes Submitted — loop {loops_label} | {email or 'N/A'}")
 
             logout_and_wait()
 
@@ -390,6 +401,10 @@ if __name__ == "__main__":
         finish_clock = time.time()
         print(f"🕒 Started : {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(start_clock))}")
         print(f"🕒 Finished: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(finish_clock))}")
+        # NEW: print unique successful login count
+        print(f"🧮 Total successful logins (all threads): {len(_successful_logins)}")
+        # (optional: keep this line too if you still want to see total votes)
+        # print(f"🧮 Total votes (all threads): {_global_submit_count}")
         print(f"🏁 All threads finished in {fmt_elapsed(finish_clock - start_clock)}")
 
     except Exception:
