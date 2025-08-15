@@ -335,7 +335,7 @@ def worker(worker_id: int, loops: int, use_edge: bool, win_size: str, win_pos: s
 
             # per-thread loop progress x/y (or x/∞)
             loops_label = f"{current_loop}/{'∞' if loops == 0 else loops}"
-            print(f"[T{worker_id}] ✅ Votes Submitted — loop {loops_label} | {email or 'N/A'}")
+            print(f"[T{worker_id}] ✅ Votes Submitted — loops # {loops_label} | {email or 'N/A'}")
 
             logout_and_wait()
 
@@ -390,7 +390,6 @@ if __name__ == "__main__":
         finish_clock = time.time()
         print(f"🕒 Started : {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(start_clock))}")
         print(f"🕒 Finished: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(finish_clock))}")
-        print(f"🧮 Total votes (all threads): {_global_submit_count}")
         print(f"🏁 All threads finished in {fmt_elapsed(finish_clock - start_clock)}")
 
     except Exception:
