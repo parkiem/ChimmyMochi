@@ -114,7 +114,7 @@ LAST = ["smith","johnson","wil","brown","jones","moi","davis","garcia","rod","ma
         "lee","thompson","white","har","sanchez","clark","ramirez","lewis","robin","walker"]
 DOMAINS = ["gmail.com","outlook.com","yahoo.com","icloud.com","aol.com"]
 def gen_email():
-    fn = random.choice(FIRST); ln = random.choice(LAST); num = random.randint(1000, 99999)
+    fn = random.choice(FIRST); ln = random.choice(LAST); num = random.randint(100, 9999)
     return f"{fn}{ln}{num}@{random.choice(DOMAINS)}".lower()
 
 # ---------- Worker ----------
@@ -402,7 +402,7 @@ if __name__ == "__main__":
         print(f"🕒 Started : {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(start_clock))}")
         print(f"🕒 Finished: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(finish_clock))}")
         # NEW: print unique successful login count
-        print(f"🧮 Total successful logins (all threads): {len(_successful_logins)}")
+        print(f"🧮  Total successful logins (all threads): {len(_successful_logins)}")
         # (optional: keep this line too if you still want to see total votes)
         # print(f"🧮 Total votes (all threads): {_global_submit_count}")
         print(f"🏁 All threads finished in {fmt_elapsed(finish_clock - start_clock)}")
