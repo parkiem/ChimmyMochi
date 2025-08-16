@@ -248,11 +248,11 @@ def worker(worker_id: int, loops: int, use_edge: bool, win_size: str, win_pos: s
             print(f"[T{worker_id}] nav error: {e}")
             return False, None
 
-        rdelay(0.6, 1.0)
+        rdelay(0.4, 0.8)
         try:
             btn = driver.find_element(By.CSS_SELECTOR, "button[aria-label='Add Vote']")
             safe_click(driver, btn)
-            rdelay(0.4, 0.7)
+            rdelay(0.3, 0.6)
         except NoSuchElementException:
             pass
 
@@ -324,7 +324,7 @@ def worker(worker_id: int, loops: int, use_edge: bool, win_size: str, win_pos: s
                 driver.execute_script("arguments[0].click();", add_btn)
             except WebDriverException:
                 pass
-            time.sleep(random.uniform(0.08, 0.18))
+            time.sleep(random.uniform(0.10, 0.18))
 
         # --- SUBMIT (modal only) ---
         def click_submit_modal():
@@ -484,7 +484,7 @@ if __name__ == "__main__":
         # Save successful logins to a text file with a header
         from datetime import datetime
 
-        report_path = "successful_logins.txt"
+        report_path = "successful_VMA_logins.txt"
         run_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         count = len(_successful_logins)
         
@@ -497,7 +497,7 @@ if __name__ == "__main__":
                 f.write(f"=== {run_ts} | {count} emails ===\n")               
                 for email in sorted(_successful_logins):
                     f.write(email + "\n")
-            print(f"✅ Saved {count} successful logins to {report_path}")
+            print(f"✅  Saved {count} successful logins to {report_path}")
         except Exception as e:
             print(f"⚠️ Could not save login list: {e}")
 
