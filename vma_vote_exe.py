@@ -480,7 +480,7 @@ if __name__ == "__main__":
         print(f"🧮  Total successful logins (all threads): {len(_successful_logins)}")
         # (optional: keep this line too if you still want to see total votes)
         # print(f"🧮 Total votes (all threads): {_global_submit_count}")
-        print(f"🕒 Elapsed   : {fmt_elapsed_compact(finish_clock - start_clock)}")
+        print(f"🕒 Elapsed : {fmt_elapsed_compact(finish_clock - start_clock)}")
 
 
     except Exception:
@@ -488,12 +488,22 @@ if __name__ == "__main__":
         print("\n=== FATAL ERROR ===")
         traceback.print_exc()
     finally:
-        # Save successful logins to a text file (append mode across runs)
+        # Save successful logins to a text file with a header
+        from datetime import datetime
+
+        report_path = "successful_logins.txt"
+        run_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        count = len(_successful_logins)    
+        
         try:
-            with open("successful_logins.txt", "a", encoding="utf-8") as f:
+            needs_gap = os.path.exists(report_path) and os.path.getsize(report_path) > 0
+            with open(report_path, "a", encoding="utf-8") as f:
+                if needs_gap:
+                    f.write("\n")
+                f.write(f"=== {run_ts} | {count} emails ===\n")    
                 for email in sorted(_successful_logins):
-                    f.write(email + "\n")
-            print(f"✅ Saved {len(_successful_logins)} successful logins to successful_logins.txt")
+                    f.write(email + "\n")                    
+            print(f"✅ Saved {count} successful logins to {report_path}")   # <-- outside 'with', still inside try
         except Exception as e:
             print(f"⚠️ Could not save login list: {e}")
 
