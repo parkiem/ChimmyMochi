@@ -112,7 +112,9 @@ def parse_args():
     p = argparse.ArgumentParser(description=f"VMA voter (Selenium, multi-thread, max threads = {MAX_THREADS})")
     p.add_argument("--threads", type=int, default=1, help=f"Number of parallel threads (max {MAX_THREADS})")
     p.add_argument("--loops",   type=int, default=1, help="Loops per thread (0 = infinite)")
-    p.add_argument("--edge", action="store_true", help="Use Edge instead of Chrome")       
+    p.add_argument("--edge", action="store_true", help="Use Edge instead of Chrome")
+    p.add_argument("--win",  default="480,360", help="Window size WxH (default 480,360)")
+    p.add_argument("--pos",  default="0,0",    help="Window position X,Y (default 0,0)")
     return p.parse_args()
 
 # ---------- Small utils ----------
@@ -149,18 +151,12 @@ def next_vote_no() -> int:
         _global_vote_no += 1
         return _global_vote_no
 
-def fmt_elapsed_compact(seconds: float) -> str:
-    s = max(0, int(seconds))
-    h, rem = divmod(s, 3600)
-    m, _ = divmod(rem, 60)
-    if h and m:
-        return f"{h}h {m}m"
-    if h:
-        return f"{h}h"
-    if m:
-        return f"{m}m"
-    return "0m"
-
+def fmt_elapsed(s: float) -> str:
+    if s >= 3600:
+        return f"{s/3600:.2f} hr"
+    if s >= 60:
+        return f"{s/60:.2f} min"
+    return f"{s:.1f} sec"
 
 # ---------- Real-name email generator (unchanged) ----------
 FIRST = ["john","michael","sarah","emily","david","chris","anna","lisa","mark","paul","james","laura",
@@ -328,7 +324,7 @@ def worker(worker_id: int, loops: int, use_edge: bool, win_size: str, win_pos: s
                 driver.execute_script("arguments[0].click();", add_btn)
             except WebDriverException:
                 pass
-            time.sleep(random.uniform(0.12, 0.18))
+            time.sleep(random.uniform(0.08, 0.18))
 
         # --- SUBMIT (modal only) ---
         def click_submit_modal():
@@ -478,8 +474,7 @@ if __name__ == "__main__":
         print(f"🧮  Total successful logins (all threads): {len(_successful_logins)}")
         # (optional: keep this line too if you still want to see total votes)
         # print(f"🧮 Total votes (all threads): {_global_submit_count}")
-        print(f"🕒 Elapsed : {fmt_elapsed_compact(finish_clock - start_clock)}")
-
+        print(f"🏁 All threads finished in {fmt_elapsed(finish_clock - start_clock)}")
 
     except Exception:
         import traceback
@@ -491,17 +486,18 @@ if __name__ == "__main__":
 
         report_path = "successful_logins.txt"
         run_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        count = len(_successful_logins)    
+        count = len(_successful_logins)
         
         try:
-            needs_gap = os.path.exists(report_path) and os.path.getsize(report_path) > 0
+            # Add a blank line if the file already has content (so runs are separated)
+            needs_gap = os.path.exists(report_path) and os.path.getsize(report_path) > 0            
             with open(report_path, "a", encoding="utf-8") as f:
                 if needs_gap:
                     f.write("\n")
-                f.write(f"=== {run_ts} | {count} emails ===\n")    
+                f.write(f"=== {run_ts} | {count} emails ===\n")               
                 for email in sorted(_successful_logins):
-                    f.write(email + "\n")                    
-            print(f"✅  Saved {count} successful logins to {report_path}")   # <-- outside 'with', still inside try
+                    f.write(email + "\n")
+            print(f"✅ Saved {count} successful logins to {report_path}")
         except Exception as e:
             print(f"⚠️ Could not save login list: {e}")
 
