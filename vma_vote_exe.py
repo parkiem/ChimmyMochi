@@ -480,7 +480,7 @@ if __name__ == "__main__":
         print(f"🧮  Total successful logins (all threads): {len(_successful_logins)}")
         # (optional: keep this line too if you still want to see total votes)
         # print(f"🧮 Total votes (all threads): {_global_submit_count}")
-        print(f"Elapsed   : {fmt_elapsed_compact(finish_clock - start_clock)}")
+        print(f"🕒 Elapsed   : {fmt_elapsed_compact(finish_clock - start_clock)}")
 
 
     except Exception:
