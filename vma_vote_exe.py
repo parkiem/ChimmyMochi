@@ -11,7 +11,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # ---------- Cross-platform "press ANY key to stop" (quiet) ----------
 stop_event = threading.Event()
 
-# Windows check
 _is_win = (os.name == 'nt')
 if _is_win:
     try:
@@ -58,7 +57,10 @@ def start_key_watcher():
     except Exception:
         return
     print("▶ Press ANY key to stop...", flush=True)
-    t = threading.Thread(target=_win_wait_for_keypress if _is_win else _posix_wait_for_keypress, daemon=True)
+    t = threading.Thread(
+        target=_win_wait_for_keypress if _is_win else _posix_wait_for_keypress,
+        daemon=True
+    )
     t.start()
 # --------------------------------------------------------------------
 
@@ -149,12 +151,18 @@ def next_vote_no() -> int:
         _global_vote_no += 1
         return _global_vote_no
 
-def fmt_elapsed(s: float) -> str:
-    if s >= 3600:
-        return f"{s/3600:.2f} hr"
-    if s >= 60:
-        return f"{s/60:.2f} min"
-    return f"{s:.1f} sec"
+def fmt_elapsed_compact(seconds: float) -> str:
+    s = max(0, int(seconds))
+    h, rem = divmod(s, 3600)
+    m, _ = divmod(rem, 60)
+    if h and m:
+        return f"{h}h {m}m"
+    if h:
+        return f"{h}h"
+    if m:
+        return f"{m}m"
+    return "0m"
+
 
 # ---------- Real-name email generator (unchanged) ----------
 FIRST = ["john","michael","sarah","emily","david","chris","anna","lisa","mark","paul","james","laura",
@@ -356,8 +364,7 @@ def worker(worker_id: int, loops: int, use_edge: bool, win_size: str, win_pos: s
         click_submit_modal()
         return True
 
-    def logout_and_wait()
-            if stop_event.is_set(): break:
+    def logout_and_wait():
         time.sleep(random.uniform(1.0, 1.8))
         try:
             b = driver.find_element(By.CSS_SELECTOR, "button.chakra-button.AuthNav__login-btn.css-ki1yvo")
@@ -380,11 +387,12 @@ def worker(worker_id: int, loops: int, use_edge: bool, win_size: str, win_pos: s
         while True:
             if stop_event.is_set():
                 break
-if loops != 0 and current_loop >= loops:
+            if loops != 0 and current_loop >= loops:
                 break
             current_loop += 1
 
-            if stop_event.is_set(): break
+            if stop_event.is_set():
+                break
             ok, email = login()
             if not ok:
                 print(f"[T{worker_id}] ⚠️ login failed"); break
@@ -394,7 +402,8 @@ if loops != 0 and current_loop >= loops:
                 with _login_lock:
                     _successful_logins.add(email)
 
-            if stop_event.is_set(): break
+            if stop_event.is_set():
+                break
             if not vote_jimin_only():
                 print(f"[T{worker_id}] ⚠️ vote failed"); break
 
@@ -408,7 +417,8 @@ if loops != 0 and current_loop >= loops:
             print(f"[T{worker_id}] ✅ Votes Submitted — loops # {loops_label} | {email or 'N/A'}")
 
             logout_and_wait()
-            if stop_event.is_set(): break
+            if stop_event.is_set():
+                break
 
     finally:
         try:
@@ -456,10 +466,10 @@ if __name__ == "__main__":
         start_key_watcher()
         try:
             with ThreadPoolExecutor(max_workers=threads) as ex:
-            futs = [ex.submit(worker, i+1, loops, use_edge, win_size, win_pos) for i in range(threads)]
-            for _ in as_completed(futs):
-                if stop_event.is_set():
-                    break
+                futs = [ex.submit(worker, i+1, loops, use_edge, win_size, win_pos) for i in range(threads)]
+                for _ in as_completed(futs):
+                    if stop_event.is_set():
+                        break
         except KeyboardInterrupt:
             stop_event.set()
 
@@ -470,12 +480,22 @@ if __name__ == "__main__":
         print(f"🧮  Total successful logins (all threads): {len(_successful_logins)}")
         # (optional: keep this line too if you still want to see total votes)
         # print(f"🧮 Total votes (all threads): {_global_submit_count}")
-        print(f"🏁 All threads finished in {fmt_elapsed(finish_clock - start_clock)}")
+        print(f"Elapsed   : {fmt_elapsed_compact(finish_clock - start_clock)}")
+
 
     except Exception:
         import traceback
         print("\n=== FATAL ERROR ===")
         traceback.print_exc()
     finally:
+        # Save successful logins to a text file (append mode across runs)
+        try:
+            with open("successful_logins.txt", "a", encoding="utf-8") as f:
+                for email in sorted(_successful_logins):
+                    f.write(email + "\n")
+            print(f"✅ Saved {len(_successful_logins)} successful logins to successful_logins.txt")
+        except Exception as e:
+            print(f"⚠️ Could not save login list: {e}")
+
         _pause_exit()
         sys.exit(0)
