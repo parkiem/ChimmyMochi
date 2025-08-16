@@ -501,7 +501,7 @@ if __name__ == "__main__":
                 f.write(f"=== {run_ts} | {count} emails ===\n")    
                 for email in sorted(_successful_logins):
                     f.write(email + "\n")                    
-            print(f"✅ Saved {count} successful logins to {report_path}")   # <-- outside 'with', still inside try
+            print(f"✅  Saved {count} successful logins to {report_path}")   # <-- outside 'with', still inside try
         except Exception as e:
             print(f"⚠️ Could not save login list: {e}")
 
