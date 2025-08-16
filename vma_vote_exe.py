@@ -112,9 +112,7 @@ def parse_args():
     p = argparse.ArgumentParser(description=f"VMA voter (Selenium, multi-thread, max threads = {MAX_THREADS})")
     p.add_argument("--threads", type=int, default=1, help=f"Number of parallel threads (max {MAX_THREADS})")
     p.add_argument("--loops",   type=int, default=1, help="Loops per thread (0 = infinite)")
-    p.add_argument("--edge", action="store_true", help="Use Edge instead of Chrome")
-    p.add_argument("--win",  default="480,360", help="Window size WxH (default 480,360)")
-    p.add_argument("--pos",  default="0,0",    help="Window position X,Y (default 0,0)")
+    p.add_argument("--edge", action="store_true", help="Use Edge instead of Chrome")       
     return p.parse_args()
 
 # ---------- Small utils ----------
@@ -330,7 +328,7 @@ def worker(worker_id: int, loops: int, use_edge: bool, win_size: str, win_pos: s
                 driver.execute_script("arguments[0].click();", add_btn)
             except WebDriverException:
                 pass
-            time.sleep(random.uniform(0.12, 0.20))
+            time.sleep(random.uniform(0.12, 0.18))
 
         # --- SUBMIT (modal only) ---
         def click_submit_modal():
